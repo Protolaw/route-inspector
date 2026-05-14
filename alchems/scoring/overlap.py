@@ -1,0 +1,337 @@
+from __future__ import annotations
+
+import json
+import sys
+import traceback
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from alchems.composite_rules.extract import (
+    RouteProcessingStats,
+    SynPlannerRuleExtractor,
+    extract_route_composites,
+    route_items,
+)
+from alchems.io import (
+    expand_composite_rule_tsv_paths,
+    read_json,
+    read_tsv_rows,
+    resolve_existing_path,
+    setup_runtime_cache_dirs,
+    split_cell,
+    write_json,
+    write_tsv,
+)
+
+
+@dataclass
+class CompositeRuleSet:
+    source: str
+    popularity_by_rule: dict[str, int]
+    references_by_rule: dict[str, set[str]]
+    rows_seen: int = 0
+    parse_errors: int = 0
+
+    @property
+    def rules(self) -> set[str]:
+        return set(self.popularity_by_rule)
+
+    @property
+    def total_popularity(self) -> int:
+        return sum(self.popularity_by_rule.values())
+
+
+def ratio(numerator: int | float, denominator: int | float) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
+def normalize_composite_rule(rule: str) -> str:
+    parts = [part.strip() for part in rule.split("$") if part.strip()]
+    if len(parts) < 2:
+        raise ValueError("composite rule must contain at least two rule SMARTS")
+    return "$".join(parts)
+
+
+def popularity_from_row(row: dict[str, str]) -> int:
+    for column in ("popularity", "route_ids_size"):
+        value = row.get(column, "").strip()
+        if value.isdigit():
+            return int(value)
+    references = split_cell(row.get("Reference"))
+    return max(len(references), 1)
+
+
+def load_extracted_composite_rule_set(paths: list[Path]) -> CompositeRuleSet:
+    popularity_by_rule: dict[str, int] = defaultdict(int)
+    references_by_rule: dict[str, set[str]] = defaultdict(set)
+    rows_seen = 0
+    parse_errors = 0
+    resolved_paths = expand_composite_rule_tsv_paths(paths)
+
+    for path in resolved_paths:
+        fieldnames, rows = read_tsv_rows(path)
+        if "Composite_rule" not in fieldnames:
+            raise ValueError(f"{path} has no Composite_rule column")
+        for row in rows:
+            rows_seen += 1
+            try:
+                rule = normalize_composite_rule(row.get("Composite_rule", ""))
+            except ValueError:
+                parse_errors += 1
+                continue
+            popularity_by_rule[rule] += popularity_from_row(row)
+            references_by_rule[rule].update(split_cell(row.get("Reference")))
+
+    return CompositeRuleSet(
+        source=",".join(str(path) for path in resolved_paths),
+        popularity_by_rule=dict(popularity_by_rule),
+        references_by_rule={rule: set(refs) for rule, refs in references_by_rule.items()},
+        rows_seen=rows_seen,
+        parse_errors=parse_errors,
+    )
+
+
+def reference_composite_rules_from_routes(
+    routes_json_path: Path,
+    rule_extractor: SynPlannerRuleExtractor,
+    *,
+    min_length: int,
+    max_length: int | None,
+    limit: int | None = None,
+    ignore_errors: bool = False,
+    progress_interval: int = 250,
+) -> tuple[CompositeRuleSet, RouteProcessingStats, list[dict[str, Any]]]:
+    routes_json_path = resolve_existing_path(routes_json_path)
+    routes_json = read_json(routes_json_path)
+    popularity_by_rule: dict[str, int] = defaultdict(int)
+    references_by_rule: dict[str, set[str]] = defaultdict(set)
+    errors: list[dict[str, Any]] = []
+    stats = RouteProcessingStats()
+
+    for index, (route_id, route) in enumerate(route_items(routes_json), start=1):
+        if limit is not None and index > limit:
+            break
+        stats.routes_seen += 1
+        try:
+            route_sequences = extract_route_composites(
+                route,
+                rule_extractor,
+                min_length=min_length,
+                max_length=max_length,
+                stats=stats,
+            )
+            if route_sequences:
+                stats.routes_with_composites += 1
+            for sequence in route_sequences:
+                rule = "$".join(sequence)
+                popularity_by_rule[rule] += 1
+                references_by_rule[rule].add(str(route_id))
+        except Exception as exc:
+            stats.errors += 1
+            errors.append(
+                {
+                    "route_id": route_id,
+                    "stage": "extract_reference_composite_rules",
+                    "error_type": type(exc).__qualname__,
+                    "message": str(exc) or traceback.format_exc(limit=1).strip(),
+                }
+            )
+            if not ignore_errors:
+                raise
+
+        if progress_interval and index % progress_interval == 0:
+            print(
+                f"processed reference routes={index} "
+                f"reference_composite_rules={len(popularity_by_rule)} "
+                f"errors={stats.errors}",
+                flush=True,
+            )
+
+    return (
+        CompositeRuleSet(
+            source=str(routes_json_path),
+            popularity_by_rule=dict(popularity_by_rule),
+            references_by_rule={
+                rule: set(refs) for rule, refs in references_by_rule.items()
+            },
+            rows_seen=stats.routes_seen,
+            parse_errors=stats.errors,
+        ),
+        stats,
+        errors,
+    )
+
+
+def overlap_score_row(
+    extracted: CompositeRuleSet,
+    reference: CompositeRuleSet,
+) -> dict[str, Any]:
+    overlap = extracted.rules & reference.rules
+    union = extracted.rules | reference.rules
+    overlapping_popularity = sum(extracted.popularity_by_rule[rule] for rule in overlap)
+    return {
+        "extracted_tsv": extracted.source,
+        "reference_routes_json": reference.source,
+        "extracted_rows": extracted.rows_seen,
+        "reference_routes": reference.rows_seen,
+        "extracted_unique_composite_rules": len(extracted.rules),
+        "reference_unique_composite_rules": len(reference.rules),
+        "overlap_unique_composite_rules": len(overlap),
+        "extracted_overlap_ratio": ratio(len(overlap), len(extracted.rules)),
+        "reference_coverage_ratio": ratio(len(overlap), len(reference.rules)),
+        "jaccard": ratio(len(overlap), len(union)),
+        "extracted_popularity": extracted.total_popularity,
+        "overlapping_popularity": overlapping_popularity,
+        "popularity_overlap_ratio": ratio(
+            overlapping_popularity,
+            extracted.total_popularity,
+        ),
+        "extracted_parse_errors": extracted.parse_errors,
+        "reference_errors": reference.parse_errors,
+    }
+
+
+def matched_rule_rows(
+    extracted: CompositeRuleSet,
+    reference: CompositeRuleSet,
+) -> list[dict[str, Any]]:
+    rows = []
+    for rule in sorted(
+        extracted.rules,
+        key=lambda item: (-extracted.popularity_by_rule[item], item),
+    ):
+        reference_ids = sorted(reference.references_by_rule.get(rule, set()))
+        rows.append(
+            {
+                "Composite_rule": rule,
+                "present_in_reference": bool(reference_ids),
+                "extracted_popularity": extracted.popularity_by_rule[rule],
+                "extracted_reference_ids": ",".join(
+                    sorted(extracted.references_by_rule.get(rule, set()))
+                ),
+                "reference_route_ids": ",".join(reference_ids),
+            }
+        )
+    return rows
+
+
+def output_paths(output: Path) -> tuple[Path, Path, Path]:
+    if output.is_dir() or output.suffix == "":
+        return (
+            output / "composite_rule_overlap_scores.tsv",
+            output / "composite_rule_overlap_matches.tsv",
+            output / "composite_rule_overlap_summary.json",
+        )
+    prefix = output.with_suffix("")
+    return (
+        output,
+        prefix.with_name(f"{prefix.name}_matches").with_suffix(".tsv"),
+        prefix.with_name(f"{prefix.name}_summary").with_suffix(".json"),
+    )
+
+
+def score_composite_rule_overlap(
+    extracted_tsvs: list[Path],
+    reference_routes_json: Path,
+    output: Path,
+    rule_extractor: SynPlannerRuleExtractor,
+    *,
+    min_length: int = 2,
+    max_length: int | None = 5,
+    limit: int | None = None,
+    ignore_errors: bool = False,
+    progress_interval: int = 250,
+) -> dict[str, Any]:
+    extracted = load_extracted_composite_rule_set(extracted_tsvs)
+    reference, reference_stats, errors = reference_composite_rules_from_routes(
+        reference_routes_json,
+        rule_extractor,
+        min_length=min_length,
+        max_length=max_length,
+        limit=limit,
+        ignore_errors=ignore_errors,
+        progress_interval=progress_interval,
+    )
+    score_row = overlap_score_row(extracted, reference)
+    score_path, matches_path, summary_path = output_paths(output)
+
+    score_fieldnames = [
+        "extracted_tsv",
+        "reference_routes_json",
+        "extracted_rows",
+        "reference_routes",
+        "extracted_unique_composite_rules",
+        "reference_unique_composite_rules",
+        "overlap_unique_composite_rules",
+        "extracted_overlap_ratio",
+        "reference_coverage_ratio",
+        "jaccard",
+        "extracted_popularity",
+        "overlapping_popularity",
+        "popularity_overlap_ratio",
+        "extracted_parse_errors",
+        "reference_errors",
+    ]
+    write_tsv(score_path, score_fieldnames, [score_row])
+
+    match_fieldnames = [
+        "Composite_rule",
+        "present_in_reference",
+        "extracted_popularity",
+        "extracted_reference_ids",
+        "reference_route_ids",
+    ]
+    write_tsv(matches_path, match_fieldnames, matched_rule_rows(extracted, reference))
+
+    summary = {
+        "extracted_tsvs": [str(resolve_existing_path(path)) for path in extracted_tsvs],
+        "reference_routes_json": str(resolve_existing_path(reference_routes_json)),
+        "output": str(score_path),
+        "matches_output": str(matches_path),
+        "summary_file": str(summary_path),
+        "min_length": min_length,
+        "max_length": max_length,
+        "reference_routes_seen": reference_stats.routes_seen,
+        "reference_routes_with_composite_rules": reference_stats.routes_with_composites,
+        "reference_reactions_seen": reference_stats.reactions_seen,
+        "reference_skipped_reactions": reference_stats.skipped_reactions,
+        "reference_errors": reference_stats.errors,
+        "reference_error_examples": errors[:25],
+        **score_row,
+    }
+    write_json(summary_path, summary)
+    return summary
+
+
+def run(args: Any) -> int:
+    setup_runtime_cache_dirs()
+    if args.min_length < 2:
+        raise ValueError("--min-length must be at least 2")
+    if args.max_length is not None and args.max_length <= 0:
+        args.max_length = None
+    if args.max_length is not None and args.max_length < args.min_length:
+        raise ValueError("--max-length must be greater than or equal to --min-length")
+
+    rule_extractor = SynPlannerRuleExtractor.from_args(args)
+    summary = score_composite_rule_overlap(
+        [resolve_existing_path(path) for path in args.extracted_tsv],
+        resolve_existing_path(args.reference_routes_json),
+        args.output,
+        rule_extractor,
+        min_length=args.min_length,
+        max_length=args.max_length,
+        limit=args.limit,
+        ignore_errors=args.ignore_errors,
+        progress_interval=args.progress_interval,
+    )
+    print(json.dumps(summary, indent=2), flush=True)
+    return 0

@@ -44,25 +44,27 @@ n1_composite_rule_extraction_summary.json
 
 ## Usage
 
+The CLIs no longer take a `--synplanner-root` argument. Run them from an
+environment where `synplan`, `chython`, and `chython-synplan` are importable
+(`conda activate synplan` in the current setup).
+
 From `/Users/almazgil/Desktop/projects/Retro-BLEU`:
 
 ```bash
-PYTHONPATH=composite_rules/src:SynPlanner \
-conda run -n synplan python -m composite_rules.extract \
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli extract-composite-rules \
   --routes-json PaRoutes/data/n1-routes.json \
-  --output composite_rules/output/n1.tsv \
-  --synplanner-root SynPlanner
+  --output composite_rules/output/n1.tsv
 ```
 
 For a quick smoke test:
 
 ```bash
-PYTHONPATH=composite_rules/src:SynPlanner \
-conda run -n synplan python -m composite_rules.extract \
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli extract-composite-rules \
   --routes-json PaRoutes/data/n1-routes.json \
   --output /private/tmp/n1.tsv \
-  --limit 100 \
-  --synplanner-root SynPlanner
+  --limit 100
 ```
 
 By default the extractor uses SynPlanner rule extraction with reactor validation
@@ -77,11 +79,10 @@ target molecule and writes a route JSON that is compatible with
 `get_route_svg_from_json`.
 
 ```bash
-PYTHONPATH=composite_rules/src:SynPlanner \
-conda run -n synplan python -m composite_rules.unwrap \
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli unwrap-composite-rule \
   --smiles 'CCO' \
   --composite-rule '[C:1]-[O:2]>>[C:1].[O:2]' \
-  --synplanner-root SynPlanner \
   --output-json /private/tmp/unwrapped_route.json \
   --output-svg /private/tmp/unwrapped_route.svg
 ```
@@ -89,12 +90,11 @@ conda run -n synplan python -m composite_rules.unwrap \
 You can also read the composite rule from one of the extractor TSV files:
 
 ```bash
-PYTHONPATH=composite_rules/src:SynPlanner \
-conda run -n synplan python -m composite_rules.unwrap \
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli unwrap-composite-rule \
   --smiles 'CCO' \
   --composite-rule-tsv /private/tmp/n1_t2_composite_rules.tsv \
   --row 0 \
-  --synplanner-root SynPlanner \
   --output-svg /private/tmp/unwrapped_route.svg
 ```
 
@@ -105,15 +105,14 @@ final in-stock leaves are the reactants and the starting molecule is the product
 The pseudo-reactions are then passed through SynPlanner rule extraction again.
 
 ```bash
-PYTHONPATH=composite_rules/src:SynPlanner \
-conda run -n synplan python -m composite_rules.alchemical \
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli extract-alchemical-rules \
   --composite-rule-tsv \
     /private/tmp/n1_t2_composite_rules.tsv \
     /private/tmp/n1_t3_composite_rules.tsv \
     /private/tmp/n1_t4_composite_rules.tsv \
     /private/tmp/n1_t5_composite_rules.tsv \
   --output /private/tmp/alchemical_out \
-  --synplanner-root SynPlanner \
   --config composite_rules/configs/rule_extraction_functional_groups.yaml \
   --ignore-errors
 ```
@@ -122,11 +121,10 @@ If you are already inside `/Users/almazgil/Desktop/projects/Retro-BLEU/composite
 use paths relative to that directory:
 
 ```bash
-PYTHONPATH=src:../SynPlanner \
-conda run -n synplan python -m composite_rules.alchemical \
+PYTHONPATH=. \
+conda run -n synplan python -m alchems.cli extract-alchemical-rules \
   --composite-rule-tsv ./comp_output \
   --output ./alchemical_out \
-  --synplanner-root ../SynPlanner \
   --config configs/rule_extraction_functional_groups.yaml \
   --ignore-errors
 ```
@@ -152,12 +150,11 @@ source composite size, and source TSV row.
 To apply one alchemical rule directly to a target:
 
 ```bash
-PYTHONPATH=composite_rules/src:SynPlanner \
-conda run -n synplan python -m composite_rules.unwrap_alchemical \
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli unwrap-alchemical-rule \
   --smiles 'CCO' \
   --alchemical-rule-tsv /private/tmp/n1_alchemical_rules.tsv \
   --row 0 \
-  --synplanner-root SynPlanner \
   --output-json /private/tmp/alchemical_unwrapped_route.json \
   --output-svg /private/tmp/alchemical_unwrapped_route.svg
 ```
@@ -166,10 +163,22 @@ To classify alchemical rules, provide a default SynPlanner rule TSV. A rule is
 negative when its QueryCGR matches any default rule; otherwise it is positive.
 
 ```bash
-PYTHONPATH=composite_rules/src:SynPlanner \
-conda run -n synplan python -m composite_rules.classify_alchemical \
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli classify-alchemical-rules \
   --alchemical-rules-tsv /private/tmp/n1_alchemical_rules.tsv \
   --default-rules-tsv /path/to/default_reaction_rules.tsv \
-  --output /private/tmp/n1_classified_alchemical_rules.tsv \
-  --synplanner-root SynPlanner
+  --output /private/tmp/n1_classified_alchemical_rules.tsv
+```
+
+## Scoring
+
+The scoring CLI measures order-sensitive overlap between extracted composite
+rule TSV files and composite rules extracted from a reference route JSON.
+
+```bash
+PYTHONPATH=composite_rules \
+conda run -n synplan python -m alchems.cli score-composite-overlap \
+  --extracted-tsv composite_rules/comp_output/n1 \
+  --reference-routes-json PaRoutes/data/n1-routes.json \
+  --output /private/tmp/composite_rule_scores
 ```

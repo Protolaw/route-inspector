@@ -1,14 +1,16 @@
 import csv
 
-from composite_rules.alchemical import (
+from alchems.alchemical_rules.alchemical import (
     AlchemicalRuleAggregate,
     PseudoReactionRecord,
     compose_pseudo_reaction_smiles,
-    expand_composite_rule_tsv_paths,
     normalize_pseudo_reaction_mapping,
-    resolve_alchemical_output_paths,
     rule_cgr_key,
-    write_errors,
+)
+from alchems.io import (
+    expand_composite_rule_tsv_paths,
+    resolve_alchemical_output_paths,
+    write_alchemical_errors,
     write_alchemical_rules_tsv,
     write_pseudo_reactions_smi,
 )
@@ -60,7 +62,7 @@ def test_write_errors_removes_stale_file_when_run_is_clean(tmp_path):
     error_path = tmp_path / "errors.tsv"
     error_path.write_text("old errors\n", encoding="utf-8")
 
-    write_errors(error_path, [])
+    write_alchemical_errors(error_path, [])
 
     assert not error_path.exists()
 

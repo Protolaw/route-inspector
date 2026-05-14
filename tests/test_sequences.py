@@ -1,4 +1,4 @@
-from composite_rules.extract import (
+from alchems.composite_rules.extract import (
     ReactionRuleStep,
     valid_composite_sequence_occurrences,
     valid_composite_sequences,

@@ -1,7 +1,7 @@
 import csv
 import json
 
-from composite_rules.extract import write_composite_rules, write_summary
+from alchems.io import write_composite_rules, write_composite_summary
 
 
 def test_write_composite_rules_splits_by_size_and_adds_popularity(tmp_path):
@@ -47,7 +47,7 @@ def test_write_composite_rules_splits_by_size_and_adds_popularity(tmp_path):
 
 def test_summary_file_name(tmp_path):
     output = tmp_path / "n1.tsv"
-    path = write_summary(output, {"ok": True})
+    path = write_composite_summary(output, {"ok": True})
 
     assert path == tmp_path / "n1_composite_rule_extraction_summary.json"
     assert json.loads(path.read_text()) == {"ok": True}
