@@ -4,22 +4,22 @@ import argparse
 import sys
 from pathlib import Path
 
-from alchems.alchemical_rules import alchemical, classify_alchemical
-from alchems.alchemical_rules import unwrap_alchemical
-from alchems.composite_rules import extract
-from alchems.composite_rules import unwrap as unwrap_composite
-from alchems.io import read_json, resolve_existing_path, setup_runtime_cache_dirs
-from alchems.protection.analysis import (
+from route_analysis.alchemical_rules import alchemical, classify_alchemical
+from route_analysis.alchemical_rules import unwrap_alchemical
+from route_analysis.composite_rules import extract
+from route_analysis.composite_rules import unwrap as unwrap_composite
+from route_analysis.io import read_json, resolve_existing_path, setup_runtime_cache_dirs
+from route_analysis.protection.analysis import (
     ProtectionAnalysisConfig,
     analyze_protection_in_routes,
     load_composite_rule_index,
 )
-from alchems.protection.chython_rules import load_chython_protection_rules
-from alchems.protection.outputs import (
+from route_analysis.protection.chython_rules import load_chython_protection_rules
+from route_analysis.protection.outputs import (
     dataset_prefix_from_routes_path,
     write_protection_outputs,
 )
-from alchems.scoring import overlap
+from route_analysis.scoring import overlap
 
 
 def add_rule_extraction_arguments(parser: argparse.ArgumentParser) -> None:
@@ -34,6 +34,17 @@ def add_rule_extraction_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--keep-incoming-groups", action="store_true")
     parser.add_argument("--reactor-validation", action="store_true")
+
+
+def add_parallel_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--n_cpu",
+        "--n-cpu",
+        type=int,
+        default=1,
+        dest="n_cpu",
+        help="Number of worker processes to use. Use 1 for sequential execution.",
+    )
 
 
 def add_composite_extraction_arguments(parser: argparse.ArgumentParser) -> None:
@@ -62,8 +73,45 @@ def add_composite_extraction_arguments(parser: argparse.ArgumentParser) -> None:
             "<output-prefix>_routes_without_composite_rules.json."
         ),
     )
+    parser.add_argument(
+        "--skip-routes-without-composites-output",
+        action="store_true",
+        help=(
+            "Do not write the routes_without_composite_rules JSON sidecar. "
+            "This is much faster and lighter for very large route collections; "
+            "summary counts and reasons are still reported."
+        ),
+    )
+    parser.add_argument(
+        "--unique-reactions-first",
+        action="store_true",
+        help=(
+            "Use a two-pass extraction plan: scan routes for unique normalized "
+            "reaction SMILES, extract each unique reaction rule once, then "
+            "compose route composite rules from the precomputed rule cache."
+        ),
+    )
     parser.add_argument("--ignore-errors", action="store_true")
     parser.add_argument("--progress-interval", type=int, default=250)
+    add_parallel_arguments(parser)
+    parser.add_argument(
+        "--worker-chunksize",
+        type=int,
+        default=16,
+        help=(
+            "Number of routes sent to each worker task during parallel composite "
+            "extraction. Larger values reduce multiprocessing overhead."
+        ),
+    )
+    parser.add_argument(
+        "--max-pending-chunks",
+        type=int,
+        default=None,
+        help=(
+            "Maximum queued worker chunks for parallel composite extraction. "
+            "Defaults to 2 * n_cpu."
+        ),
+    )
 
 
 def add_alchemical_extraction_arguments(parser: argparse.ArgumentParser) -> None:
@@ -91,6 +139,7 @@ def add_alchemical_extraction_arguments(parser: argparse.ArgumentParser) -> None
     parser.add_argument("--limit-applications", type=int, default=None)
     parser.add_argument("--ignore-errors", action="store_true")
     parser.add_argument("--progress-interval", type=int, default=250)
+    add_parallel_arguments(parser)
 
 
 def add_alchemical_classification_arguments(parser: argparse.ArgumentParser) -> None:
@@ -98,6 +147,7 @@ def add_alchemical_classification_arguments(parser: argparse.ArgumentParser) -> 
     parser.add_argument("--default-rules-tsv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary", type=Path, default=None)
+    add_parallel_arguments(parser)
 
 
 def add_composite_unwrap_arguments(parser: argparse.ArgumentParser) -> None:
@@ -170,6 +220,7 @@ def add_scoring_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-length", type=int, default=5)
     parser.add_argument("--ignore-errors", action="store_true")
     parser.add_argument("--progress-interval", type=int, default=250)
+    add_parallel_arguments(parser)
 
 
 def add_protection_arguments(parser: argparse.ArgumentParser) -> None:
@@ -201,6 +252,7 @@ def add_protection_arguments(parser: argparse.ArgumentParser) -> None:
         default=100,
         help="Print route-level progress every N processed routes. Use 0 to disable.",
     )
+    add_parallel_arguments(parser)
 
 
 def read_protection_route_ids(path: Path | None) -> set[str] | None:
@@ -256,6 +308,7 @@ def run_protection_analysis(args: argparse.Namespace) -> int:
         limit=args.limit,
         route_ids=read_protection_route_ids(route_ids_path),
         progress_interval=args.progress_interval,
+        n_cpu=args.n_cpu,
     )
     output_info = write_protection_outputs(
         result,
@@ -278,7 +331,7 @@ def run_protection_analysis(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="alchems")
+    parser = argparse.ArgumentParser(prog="route-inspector")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     extract_parser = subparsers.add_parser(

@@ -7,17 +7,18 @@ import statistics
 import sys
 import traceback
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-from alchems.alchemical_rules.alchemical import (
+from route_analysis.alchemical_rules.alchemical import (
     query_cgr_coarse_signature,
     query_cgr_isomorphic,
     rule_query_cgr,
 )
-from alchems.composite_rules.extract import (
+from route_analysis.composite_rules.extract import (
     ReactionRuleStep,
     SynPlannerRuleExtractor,
     normalize_route_tree,
@@ -26,14 +27,21 @@ from alchems.composite_rules.extract import (
     route_target_smiles,
     valid_composite_sequence_occurrences,
 )
-from alchems.composite_rules.unwrap import split_composite_rule
-from alchems.io import (
+from route_analysis.composite_rules.unwrap import split_composite_rule
+from route_analysis.io import (
     expand_composite_rule_tsv_paths,
+    normalize_n_cpu,
     read_tsv_rows,
     reference_sort_key,
     split_cell,
 )
-from alchems.protection.chython_rules import ProtectionRule
+from route_analysis.protection.chython_rules import ProtectionRule
+
+
+_PROTECTION_WORKER_CONFIG: ProtectionAnalysisConfig | None = None
+_PROTECTION_WORKER_RULES: dict[str, ProtectionRule] | None = None
+_PROTECTION_WORKER_COMPOSITE_INDEX: dict[str, CompositeRuleFamily] | None = None
+_PROTECTION_WORKER_RULE_EXTRACTOR: SynPlannerRuleExtractor | None = None
 
 
 @dataclass
@@ -1815,6 +1823,76 @@ def network_edges(
     return rows
 
 
+def _init_protection_worker(
+    config: ProtectionAnalysisConfig,
+    composite_rule_index: dict[str, CompositeRuleFamily] | None,
+    protection_rules: dict[str, ProtectionRule] | None,
+) -> None:
+    global _PROTECTION_WORKER_CONFIG
+    global _PROTECTION_WORKER_RULES
+    global _PROTECTION_WORKER_COMPOSITE_INDEX
+    global _PROTECTION_WORKER_RULE_EXTRACTOR
+    from route_analysis.io import setup_runtime_cache_dirs
+    from route_analysis.protection.chython_rules import load_chython_protection_rules
+
+    setup_runtime_cache_dirs()
+    _PROTECTION_WORKER_CONFIG = config
+    _PROTECTION_WORKER_RULES = protection_rules or load_chython_protection_rules()
+    _PROTECTION_WORKER_COMPOSITE_INDEX = composite_rule_index
+    _PROTECTION_WORKER_RULE_EXTRACTOR = None
+    if config.collect_interval_rules:
+        try:
+            _PROTECTION_WORKER_RULE_EXTRACTOR = default_rule_extractor()
+        except Exception:
+            _PROTECTION_WORKER_RULE_EXTRACTOR = None
+
+
+def _protection_route_worker(item: tuple[str, dict[str, Any]]) -> dict[str, Any]:
+    route_id, route = item
+    try:
+        if _PROTECTION_WORKER_CONFIG is None or _PROTECTION_WORKER_RULES is None:
+            raise RuntimeError("protection worker was not initialized")
+        route_events, route_interval_rules, route_index = analyze_route_protection(
+            route,
+            route_id,
+            _PROTECTION_WORKER_RULES,
+            composite_rule_index=_PROTECTION_WORKER_COMPOSITE_INDEX,
+            config=_PROTECTION_WORKER_CONFIG,
+            rule_extractor=_PROTECTION_WORKER_RULE_EXTRACTOR,
+        )
+        return {
+            "route_id": route_id,
+            "events": route_events,
+            "interval_rules": route_interval_rules,
+            "route_stats_row": route_stats_row(
+                route_id,
+                route_index,
+                route_events,
+                route_interval_rules,
+            ),
+            "debug_route": (
+                route_index.route
+                if _PROTECTION_WORKER_CONFIG.write_debug_json and route_events
+                else None
+            ),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "route_id": route_id,
+            "events": [],
+            "interval_rules": [],
+            "route_stats_row": None,
+            "debug_route": None,
+            "error": {
+                "route_id": route_id,
+                "stage": "analyze_route_protection",
+                "error_type": type(exc).__qualname__,
+                "message": str(exc) or traceback.format_exc(limit=1).strip(),
+            },
+        }
+
+
 def analyze_protection_in_routes(
     routes_json: Any,
     composite_rule_index: dict[str, CompositeRuleFamily] | None = None,
@@ -1825,8 +1903,9 @@ def analyze_protection_in_routes(
     route_ids: set[str] | None = None,
     collect_interval_rules: bool | None = None,
     progress_interval: int = 0,
+    n_cpu: int = 1,
 ) -> ProtectionAnalysisResult:
-    from alchems.protection.chython_rules import load_chython_protection_rules
+    from route_analysis.protection.chython_rules import load_chython_protection_rules
 
     config = config or ProtectionAnalysisConfig()
     protection_rules = protection_rules or load_chython_protection_rules()
@@ -1845,56 +1924,43 @@ def analyze_protection_in_routes(
     errors: list[dict[str, Any]] = []
     debug_routes: dict[str, dict[str, Any]] = {}
     routes_seen = 0
-
-    for _index_in_file, (route_id_raw, route) in enumerate(
-        route_items(routes_json),
-        start=1,
-    ):
+    route_work_items: list[tuple[str, dict[str, Any]]] = []
+    for route_id_raw, route in route_items(routes_json):
         route_id = str(route_id_raw)
         if route_ids is not None and route_id not in route_ids:
             continue
-        if limit is not None and routes_seen >= limit:
+        if limit is not None and len(route_work_items) >= limit:
             break
+        route_work_items.append((route_id, route))
+    route_by_id = {route_id: route for route_id, route in route_work_items}
+    n_cpu = normalize_n_cpu(n_cpu)
+
+    def consume_result(result: dict[str, Any]) -> None:
+        nonlocal routes_seen
         routes_seen += 1
-        try:
-            route_events, route_interval_rules, route_index = analyze_route_protection(
-                route,
-                route_id,
-                protection_rules,
-                composite_rule_index=composite_rule_index,
-                config=config,
-                rule_extractor=rule_extractor,
-            )
-            events.extend(route_events)
-            interval_rules.extend(route_interval_rules)
-            route_stats_rows.append(
-                route_stats_row(
-                    route_id,
-                    route_index,
-                    route_events,
-                    route_interval_rules,
-                )
-            )
-            if config.write_debug_json and route_events:
-                debug_routes[route_id] = route_index.route
-        except Exception as exc:
+        error = result.get("error")
+        if error:
             if not config.ignore_errors:
-                raise
-            errors.append(
-                {
-                    "route_id": route_id,
-                    "stage": "analyze_route_protection",
-                    "error_type": type(exc).__qualname__,
-                    "message": str(exc) or traceback.format_exc(limit=1).strip(),
-                }
-            )
+                raise RuntimeError(
+                    f"route {error['route_id']} failed during protection analysis: "
+                    f"{error['error_type']}: {error['message']}"
+                )
+            errors.append(error)
             try:
-                route_index = build_route_index(route)
+                route_index = build_route_index(route_by_id[result["route_id"]])
                 route_stats_rows.append(
-                    route_stats_row(route_id, route_index, [], [])
+                    route_stats_row(result["route_id"], route_index, [], [])
                 )
             except Exception:
                 pass
+            return
+
+        events.extend(result["events"])
+        interval_rules.extend(result["interval_rules"])
+        if result["route_stats_row"] is not None:
+            route_stats_rows.append(result["route_stats_row"])
+        if result["debug_route"] is not None:
+            debug_routes[result["route_id"]] = result["debug_route"]
 
         if progress_interval and routes_seen % progress_interval == 0:
             print(
@@ -1905,6 +1971,74 @@ def analyze_protection_in_routes(
                 file=sys.stderr,
                 flush=True,
             )
+
+    if n_cpu > 1 and route_work_items:
+        with ProcessPoolExecutor(
+            max_workers=n_cpu,
+            initializer=_init_protection_worker,
+            initargs=(config, composite_rule_index, None),
+        ) as executor:
+            for result in executor.map(_protection_route_worker, route_work_items):
+                consume_result(result)
+    else:
+        try:
+            for route_id, route in route_work_items:
+                try:
+                    route_events, route_interval_rules, route_index = (
+                        analyze_route_protection(
+                            route,
+                            route_id,
+                            protection_rules,
+                            composite_rule_index=composite_rule_index,
+                            config=config,
+                            rule_extractor=rule_extractor,
+                        )
+                    )
+                    result = {
+                        "route_id": route_id,
+                        "events": route_events,
+                        "interval_rules": route_interval_rules,
+                        "route_stats_row": route_stats_row(
+                            route_id,
+                            route_index,
+                            route_events,
+                            route_interval_rules,
+                        ),
+                        "debug_route": (
+                            route_index.route
+                            if config.write_debug_json and route_events
+                            else None
+                        ),
+                        "error": None,
+                    }
+                except Exception as exc:
+                    result = {
+                        "route_id": route_id,
+                        "events": [],
+                        "interval_rules": [],
+                        "route_stats_row": None,
+                        "debug_route": None,
+                        "error": {
+                            "route_id": route_id,
+                            "stage": "analyze_route_protection",
+                            "error_type": type(exc).__qualname__,
+                            "message": str(exc)
+                            or traceback.format_exc(limit=1).strip(),
+                        },
+                    }
+                consume_result(result)
+        finally:
+            pass
+
+    if progress_interval and routes_seen % progress_interval:
+        print(
+            "[analyze-protection] processed "
+            f"{routes_seen} routes; events={len(events)}; "
+            f"failures={sum(1 for event in events if event.trace_status == 'failed')}; "
+            f"ambiguous={sum(1 for event in events if event.trace_status == 'ambiguous')}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     event_rows = [event_to_row(event) for event in events]
     interval_rule_rows = [interval_rule_to_row(obs) for obs in interval_rules]
@@ -1951,6 +2085,7 @@ def analyze_protection_in_routes(
             "include_multicenter": config.include_multicenter,
             "querycgr_compare": config.querycgr_compare,
         },
+        "n_cpu": n_cpu,
         "software": {
             "composite_rules_commit": "",
             "chython_version": "",

@@ -100,18 +100,18 @@ def _load_from_reactor_deprotection() -> dict[str, ProtectionRule]:
 
 
 def _load_from_local_protective() -> dict[str, ProtectionRule]:
-    from alchems.protection import chython_protective as module
+    from route_analysis.protection import chython_protective as module
 
     return _adapt_protective_rules(
         module.rules,
-        source="alchems.protection.chython_protective",
+        source="route_analysis.protection.chython_protective",
     )
 
 
 def load_chython_protection_rules() -> dict[str, ProtectionRule]:
     """Load the curated protecting-group rules available in this environment.
 
-    The project-local ``alchems.protection.chython_protective`` copy is tried
+    The project-local ``route_analysis.protection.chython_protective`` copy is tried
     first to avoid environment-version differences in chython. Newer chython
     builds can also expose ``chython.algorithms.groups._protective.rules``;
     older SynPlanner environments expose similar definitions through

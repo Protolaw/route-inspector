@@ -4,6 +4,7 @@ import json
 import sys
 import traceback
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,14 +14,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from alchems.composite_rules.extract import (
+from route_analysis.composite_rules.extract import (
     RouteProcessingStats,
     SynPlannerRuleExtractor,
-    extract_route_composites,
-    route_items,
+    _composite_route_worker,
+    _init_composite_worker,
+    limited_route_items,
+    merge_route_processing_stats,
+    process_route_for_composites,
+    rule_extractor_args_dict,
 )
-from alchems.io import (
+from route_analysis.io import (
     expand_composite_rule_tsv_paths,
+    normalize_n_cpu,
     read_json,
     read_tsv_rows,
     resolve_existing_path,
@@ -220,44 +226,40 @@ def reference_composite_rules_from_routes(
     limit: int | None = None,
     ignore_errors: bool = False,
     progress_interval: int = 250,
+    n_cpu: int = 1,
+    extractor_args: Any | None = None,
 ) -> tuple[CompositeRuleSet, RouteProcessingStats, list[dict[str, Any]]]:
     routes_json_path = resolve_existing_path(routes_json_path)
     routes_json = read_json(routes_json_path)
+    route_work_items = limited_route_items(routes_json, limit)
+    n_cpu = normalize_n_cpu(n_cpu)
     popularity_by_rule: dict[str, int] = defaultdict(int)
     references_by_rule: dict[str, set[str]] = defaultdict(set)
     errors: list[dict[str, Any]] = []
     stats = RouteProcessingStats()
 
-    for index, (route_id, route) in enumerate(route_items(routes_json), start=1):
-        if limit is not None and index > limit:
-            break
-        stats.routes_seen += 1
-        try:
-            route_sequences = extract_route_composites(
-                route,
-                rule_extractor,
-                min_length=min_length,
-                max_length=max_length,
-                stats=stats,
-            )
-            if route_sequences:
-                stats.routes_with_composites += 1
-            for sequence in route_sequences:
-                rule = "$".join(sequence)
-                popularity_by_rule[rule] += 1
-                references_by_rule[rule].add(str(route_id))
-        except Exception as exc:
-            stats.errors += 1
+    def consume_result(result: dict[str, Any], index: int) -> None:
+        merge_route_processing_stats(stats, result["stats"])
+        error = result.get("error")
+        if error:
             errors.append(
                 {
-                    "route_id": route_id,
+                    **error,
                     "stage": "extract_reference_composite_rules",
-                    "error_type": type(exc).__qualname__,
-                    "message": str(exc) or traceback.format_exc(limit=1).strip(),
                 }
             )
             if not ignore_errors:
-                raise
+                raise RuntimeError(
+                    f"route {error['route_id']} failed during reference extraction: "
+                    f"{error['error_type']}: {error['message']}"
+                )
+            return
+
+        route_id = result["route_id"]
+        for sequence in result["route_sequences"]:
+            rule = "$".join(sequence)
+            popularity_by_rule[rule] += 1
+            references_by_rule[rule].add(str(route_id))
 
         if progress_interval and index % progress_interval == 0:
             print(
@@ -266,6 +268,60 @@ def reference_composite_rules_from_routes(
                 f"errors={stats.errors}",
                 flush=True,
             )
+
+    if n_cpu > 1 and route_work_items:
+        if extractor_args is None:
+            raise ValueError("extractor_args is required when n_cpu > 1")
+        with ProcessPoolExecutor(
+            max_workers=n_cpu,
+            initializer=_init_composite_worker,
+            initargs=(
+                rule_extractor_args_dict(extractor_args),
+                min_length,
+                max_length,
+                False,
+            ),
+        ) as executor:
+            for index, result in enumerate(
+                executor.map(_composite_route_worker, route_work_items),
+                start=1,
+            ):
+                consume_result(result, index)
+    else:
+        for index, (route_id, route) in enumerate(route_work_items, start=1):
+            try:
+                result = process_route_for_composites(
+                    route_id,
+                    route,
+                    rule_extractor,
+                    min_length=min_length,
+                    max_length=max_length,
+                    store_route_without_composites=False,
+                )
+            except Exception as exc:
+                result = {
+                    "route_id": route_id,
+                    "route_sequences": {},
+                    "single_rules": {},
+                    "route_without_composites": None,
+                    "no_composite_reason": "",
+                    "stats": RouteProcessingStats(routes_seen=1, errors=1),
+                    "error": {
+                        "route_id": route_id,
+                        "stage": "extract_reference_composite_rules",
+                        "error_type": type(exc).__qualname__,
+                        "message": str(exc) or traceback.format_exc(limit=1).strip(),
+                    },
+                }
+            consume_result(result, index)
+
+    if progress_interval and len(route_work_items) % progress_interval:
+        print(
+            f"processed reference routes={len(route_work_items)} "
+            f"reference_composite_rules={len(popularity_by_rule)} "
+            f"errors={stats.errors}",
+            flush=True,
+        )
 
     return (
         CompositeRuleSet(
@@ -435,6 +491,8 @@ def score_composite_rule_overlap(
     ignore_errors: bool = False,
     progress_interval: int = 250,
     classification_tsvs: list[Path] | None = None,
+    n_cpu: int = 1,
+    extractor_args: Any | None = None,
 ) -> dict[str, Any]:
     extracted = load_extracted_composite_rule_set(extracted_tsvs)
     classifications = load_composite_rule_classifications(classification_tsvs)
@@ -446,6 +504,8 @@ def score_composite_rule_overlap(
         limit=limit,
         ignore_errors=ignore_errors,
         progress_interval=progress_interval,
+        n_cpu=n_cpu,
+        extractor_args=extractor_args,
     )
     score_row = overlap_score_row(extracted, reference, classifications)
     score_path, matches_path, summary_path = output_paths(output)
@@ -509,6 +569,7 @@ def score_composite_rule_overlap(
         "summary_file": str(summary_path),
         "min_length": min_length,
         "max_length": max_length,
+        "n_cpu": normalize_n_cpu(n_cpu),
         "reference_routes_seen": reference_stats.routes_seen,
         "reference_routes_with_composite_rules": reference_stats.routes_with_composites,
         "reference_reactions_seen": reference_stats.reactions_seen,
@@ -541,6 +602,8 @@ def run(args: Any) -> int:
         limit=args.limit,
         ignore_errors=args.ignore_errors,
         progress_interval=args.progress_interval,
+        n_cpu=args.n_cpu,
+        extractor_args=args,
         classification_tsvs=(
             [resolve_existing_path(path) for path in args.classification_tsv]
             if args.classification_tsv

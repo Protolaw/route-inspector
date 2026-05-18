@@ -1,6 +1,6 @@
 import csv
 
-from alchems.alchemical_rules.alchemical import (
+from route_analysis.alchemical_rules.alchemical import (
     AlchemicalRuleAggregate,
     ExtractedAlchemicalRule,
     PseudoReactionRecord,
@@ -11,7 +11,7 @@ from alchems.alchemical_rules.alchemical import (
     rule_cgr_key,
     rule_query_cgr,
 )
-from alchems.io import (
+from route_analysis.io import (
     expand_composite_rule_tsv_paths,
     reaction_output_reactants_num,
     resolve_alchemical_output_paths,
@@ -236,7 +236,7 @@ def test_collect_alchemical_rules_merges_query_cgr_duplicates(
     ]
 
     monkeypatch.setattr(
-        "alchems.alchemical_rules.alchemical.compose_pseudo_reaction_smiles",
+        "route_analysis.alchemical_rules.alchemical.compose_pseudo_reaction_smiles",
         lambda target_smiles, composite_rule: f"{target_smiles}>{composite_rule}",
     )
 
@@ -273,7 +273,7 @@ def test_collect_alchemical_rules_writes_skipped_unwrap_context(
     tmp_path,
     monkeypatch,
 ):
-    from alchems.composite_rules.unwrap import RuleApplicationError
+    from route_analysis.composite_rules.unwrap import RuleApplicationError
 
     composite_path = tmp_path / "n1_t2_composite_rules.tsv"
     composite_path.write_text(
@@ -286,7 +286,7 @@ def test_collect_alchemical_rules_writes_skipped_unwrap_context(
         raise RuleApplicationError("rule did not match active molecule")
 
     monkeypatch.setattr(
-        "alchems.alchemical_rules.alchemical.compose_pseudo_reaction_smiles",
+        "route_analysis.alchemical_rules.alchemical.compose_pseudo_reaction_smiles",
         fail_unwrap,
     )
 

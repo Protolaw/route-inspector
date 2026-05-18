@@ -1,10 +1,10 @@
 from chython import smarts
 
-from alchems.protection.analysis import (
+from route_analysis.protection.analysis import (
     ProtectionAnalysisConfig,
     analyze_route_protection,
 )
-from alchems.protection.chython_rules import ProtectionRule
+from route_analysis.protection.chython_rules import ProtectionRule
 
 
 PROTECTED = "[CH3:1][CH2:2][O:3][Si:4]([CH3:5])([CH3:6])[CH3:7]"
@@ -159,7 +159,7 @@ def test_normalizes_step_local_maps_before_tracing():
 def test_multicenter_deprotection_is_kept(monkeypatch):
     route = route_with_child(protected_mol(in_stock=True))
     monkeypatch.setattr(
-        "alchems.protection.analysis.reaction_center_atoms",
+        "route_analysis.protection.analysis.reaction_center_atoms",
         lambda _reaction_smiles: frozenset({3, 4, 8}),
     )
 

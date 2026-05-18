@@ -1,4 +1,4 @@
-from alchems.composite_rules.extract import (
+from route_analysis.composite_rules.extract import (
     MoleculeCenterProjection,
     ReactionRuleStep,
     adjacent_centers_overlap,

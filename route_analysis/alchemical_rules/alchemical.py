@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,14 +14,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from alchems.composite_rules.unwrap import (
+from route_analysis.composite_rules.unwrap import (
     RuleApplicationError,
     split_composite_rule,
     unwrap_rule_sequence,
 )
-from alchems.io import (
+from route_analysis.io import (
     expand_composite_rule_tsv_paths,
     iter_composite_rule_applications,
+    normalize_n_cpu,
     resolve_alchemical_output_paths,
     resolve_existing_path,
     setup_runtime_cache_dirs,
@@ -28,6 +31,9 @@ from alchems.io import (
     write_json,
     write_pseudo_reactions_smi,
 )
+
+
+_ALCHEMICAL_WORKER_EXTRACTOR: AlchemicalRuleExtractor | None = None
 
 
 @dataclass(frozen=True)
@@ -372,13 +378,151 @@ class AlchemicalRuleExtractor:
 
         rule = rules[0]
         query_cgr = rule.compose()
+        rule_smarts = _rule_to_reactor_smarts(rule)
         extracted = ExtractedAlchemicalRule(
-            rule_smarts=_rule_to_reactor_smarts(rule),
-            cgr_key=str(query_cgr),
+            rule_smarts=rule_smarts,
+            cgr_key=rule_cgr_key(rule_smarts),
             query_cgr=query_cgr,
         )
         self.cache[reaction_smiles] = extracted
         return extracted
+
+
+def alchemical_extractor_args_dict(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "config": str(args.config) if getattr(args, "config", None) else None,
+        "environment_atom_count": getattr(args, "environment_atom_count", 1),
+        "include_rings": getattr(args, "include_rings", False),
+        "keep_leaving_groups": getattr(args, "keep_leaving_groups", True),
+        "keep_incoming_groups": getattr(args, "keep_incoming_groups", False),
+        "reactor_validation": getattr(args, "reactor_validation", False),
+    }
+
+
+def _init_alchemical_worker(extractor_args: dict[str, Any]) -> None:
+    global _ALCHEMICAL_WORKER_EXTRACTOR
+    setup_runtime_cache_dirs()
+    _ALCHEMICAL_WORKER_EXTRACTOR = AlchemicalRuleExtractor.from_args(
+        argparse.Namespace(**extractor_args)
+    )
+
+
+def _alchemical_application_worker(item: tuple[int, Any]) -> dict[str, Any]:
+    _application_index, application = item
+    try:
+        if _ALCHEMICAL_WORKER_EXTRACTOR is None:
+            raise RuntimeError("alchemical worker was not initialized")
+        pseudo_reaction_smiles = compose_pseudo_reaction_smiles(
+            application.target_smiles,
+            application.composite_rule,
+        )
+        extracted = _ALCHEMICAL_WORKER_EXTRACTOR.extract(pseudo_reaction_smiles)
+        if extracted is None:
+            return {
+                "status": "skipped_rule_extraction",
+                "application": application,
+                "pseudo_reaction_smiles": pseudo_reaction_smiles,
+            }
+        return {
+            "status": "ok",
+            "application": application,
+            "pseudo_reaction_smiles": pseudo_reaction_smiles,
+            "rule_smarts": extracted.rule_smarts,
+        }
+    except Exception as exc:
+        if isinstance(exc, RuleApplicationError):
+            return {
+                "status": "skipped_unwrap",
+                "application": application,
+                "error": collection_error_row(
+                    application,
+                    stage="skipped_unwrap",
+                    exc=exc,
+                ),
+            }
+        if is_standardization_error(exc):
+            return {
+                "status": "skipped_rule_extraction_error",
+                "application": application,
+            }
+        return {
+            "status": "error",
+            "application": application,
+            "error": {
+                **collection_error_row(application, stage="error", exc=exc),
+                "error_type": type(exc).__qualname__,
+                "message": str(exc) or traceback.format_exc(limit=1).strip(),
+            },
+        }
+
+
+def select_composite_rule_applications(
+    composite_rule_tsvs: list[Path],
+    *,
+    limit_rows: int | None = None,
+    limit_applications: int | None = None,
+) -> tuple[list[Any], int]:
+    applications = []
+    rows_seen: set[tuple[Path, int]] = set()
+    composite_rows_seen = 0
+    for application in iter_composite_rule_applications(composite_rule_tsvs):
+        if limit_applications is not None and len(applications) >= limit_applications:
+            break
+        row_key = (application.source_tsv, application.row_index)
+        if row_key not in rows_seen:
+            if limit_rows is not None and composite_rows_seen >= limit_rows:
+                break
+            rows_seen.add(row_key)
+            composite_rows_seen += 1
+        applications.append(application)
+    return applications, composite_rows_seen
+
+
+def merge_alchemical_success(
+    *,
+    application: Any,
+    pseudo_reaction_smiles: str,
+    rule_smarts: str,
+    aggregates: dict[str, AlchemicalRuleAggregate],
+    aggregate_buckets: dict[tuple[Any, ...], list[AlchemicalRuleAggregate]],
+    pseudo_reactions: list[PseudoReactionRecord],
+) -> None:
+    query_cgr = rule_query_cgr(rule_smarts)
+    cgr_key = rule_cgr_key(rule_smarts)
+    aggregate = matching_aggregate(aggregate_buckets, query_cgr)
+    if aggregate is None:
+        aggregate = AlchemicalRuleAggregate(
+            rule_smarts=rule_smarts,
+            cgr_key=cgr_key,
+            query_cgr=query_cgr,
+        )
+        aggregates[aggregate.cgr_key] = aggregate
+        aggregate_buckets.setdefault(
+            query_cgr_coarse_signature(query_cgr),
+            [],
+        ).append(aggregate)
+
+    pseudo_reaction_id = f"p{len(pseudo_reactions)}"
+    pseudo_reactions.append(
+        PseudoReactionRecord(
+            pseudo_reaction_id=pseudo_reaction_id,
+            alchemical_cgr=aggregate.cgr_key,
+            reaction_smiles=pseudo_reaction_smiles,
+            source_tsv=str(application.source_tsv),
+            source_row=application.row_index,
+            route_ids=application.route_ids,
+            target_smiles=application.target_smiles,
+            composite_size=application.composite_size,
+            composite_rule=application.composite_rule,
+        )
+    )
+
+    aggregate.route_ids.update(application.route_ids)
+    aggregate.target_molecules.add(application.target_smiles)
+    aggregate.composite_rules.add(application.composite_rule)
+    aggregate.composite_sizes.add(application.composite_size)
+    aggregate.source_rows.add(f"{application.source_tsv.name}:{application.row_index}")
+    aggregate.pseudo_reaction_ids.append(pseudo_reaction_id)
 
 
 def collect_alchemical_rules(
@@ -389,6 +533,8 @@ def collect_alchemical_rules(
     limit_applications: int | None = None,
     ignore_errors: bool = False,
     progress_interval: int = 250,
+    n_cpu: int = 1,
+    extractor_args: argparse.Namespace | None = None,
 ) -> tuple[
     dict[str, AlchemicalRuleAggregate],
     list[PseudoReactionRecord],
@@ -400,91 +546,47 @@ def collect_alchemical_rules(
     pseudo_reactions: list[PseudoReactionRecord] = []
     errors: list[dict[str, Any]] = []
     stats = AlchemicalCollectionStats()
-    rows_seen: set[tuple[Path, int]] = set()
+    applications, stats.composite_rows_seen = select_composite_rule_applications(
+        composite_rule_tsvs,
+        limit_rows=limit_rows,
+        limit_applications=limit_applications,
+    )
+    n_cpu = normalize_n_cpu(n_cpu)
 
-    for application in iter_composite_rule_applications(composite_rule_tsvs):
-        if (
-            limit_applications is not None
-            and stats.applications_seen >= limit_applications
-        ):
-            break
-
-        row_key = (application.source_tsv, application.row_index)
-        if row_key not in rows_seen:
-            if limit_rows is not None and stats.composite_rows_seen >= limit_rows:
-                break
-            rows_seen.add(row_key)
-            stats.composite_rows_seen += 1
-
+    def consume_result(result: dict[str, Any]) -> None:
+        application = result["application"]
         stats.applications_seen += 1
+        status = result["status"]
 
-        try:
-            pseudo_reaction_smiles = compose_pseudo_reaction_smiles(
-                application.target_smiles,
-                application.composite_rule,
-            )
+        if status == "ok":
             stats.pseudo_reactions_built += 1
-            extracted = extractor.extract(pseudo_reaction_smiles)
-            if extracted is None:
-                stats.skipped_rule_extractions += 1
-                continue
             stats.alchemical_rules_extracted += 1
-
-            aggregate = matching_aggregate(aggregate_buckets, extracted.query_cgr)
-            if aggregate is None:
-                aggregate = AlchemicalRuleAggregate(
-                    rule_smarts=extracted.rule_smarts,
-                    cgr_key=extracted.cgr_key,
-                    query_cgr=extracted.query_cgr,
-                )
-                aggregates[aggregate.cgr_key] = aggregate
-                aggregate_buckets.setdefault(
-                    query_cgr_coarse_signature(extracted.query_cgr),
-                    [],
-                ).append(aggregate)
-
-            pseudo_reaction_id = f"p{len(pseudo_reactions)}"
-            pseudo_reactions.append(
-                PseudoReactionRecord(
-                    pseudo_reaction_id=pseudo_reaction_id,
-                    alchemical_cgr=aggregate.cgr_key,
-                    reaction_smiles=pseudo_reaction_smiles,
-                    source_tsv=str(application.source_tsv),
-                    source_row=application.row_index,
-                    route_ids=application.route_ids,
-                    target_smiles=application.target_smiles,
-                    composite_size=application.composite_size,
-                    composite_rule=application.composite_rule,
-                )
+            merge_alchemical_success(
+                application=application,
+                pseudo_reaction_smiles=result["pseudo_reaction_smiles"],
+                rule_smarts=result["rule_smarts"],
+                aggregates=aggregates,
+                aggregate_buckets=aggregate_buckets,
+                pseudo_reactions=pseudo_reactions,
             )
-
-            aggregate.route_ids.update(application.route_ids)
-            aggregate.target_molecules.add(application.target_smiles)
-            aggregate.composite_rules.add(application.composite_rule)
-            aggregate.composite_sizes.add(application.composite_size)
-            aggregate.source_rows.add(
-                f"{application.source_tsv.name}:{application.row_index}"
-            )
-            aggregate.pseudo_reaction_ids.append(pseudo_reaction_id)
-        except Exception as exc:
-            if isinstance(exc, RuleApplicationError):
-                stats.skipped_unwrap_applications += 1
-                errors.append(
-                    collection_error_row(
-                        application,
-                        stage="skipped_unwrap",
-                        exc=exc,
-                    )
-                )
-                continue
-            if is_standardization_error(exc):
-                stats.skipped_rule_extraction_errors += 1
-                continue
-
+        elif status == "skipped_rule_extraction":
+            stats.pseudo_reactions_built += 1
+            stats.skipped_rule_extractions += 1
+        elif status == "skipped_rule_extraction_error":
+            stats.skipped_rule_extraction_errors += 1
+        elif status == "skipped_unwrap":
+            stats.skipped_unwrap_applications += 1
+            errors.append(result["error"])
+        else:
             stats.errors += 1
-            errors.append(collection_error_row(application, stage="error", exc=exc))
+            errors.append(result["error"])
             if not ignore_errors:
-                raise
+                raise RuntimeError(
+                    "alchemical rule extraction failed for "
+                    f"{application.source_tsv}:{application.row_index}: "
+                    f"{result['error'].get('error_type', 'Error')}: "
+                    f"{result['error'].get('message', '')}"
+                )
 
         if progress_interval and stats.applications_seen % progress_interval == 0:
             print(
@@ -494,6 +596,82 @@ def collect_alchemical_rules(
                 f"errors={stats.errors}",
                 flush=True,
             )
+
+    if n_cpu > 1 and applications:
+        if extractor_args is None:
+            raise ValueError("extractor_args is required when n_cpu > 1")
+        with ProcessPoolExecutor(
+            max_workers=n_cpu,
+            initializer=_init_alchemical_worker,
+            initargs=(alchemical_extractor_args_dict(extractor_args),),
+        ) as executor:
+            for result in executor.map(
+                _alchemical_application_worker,
+                enumerate(applications),
+            ):
+                consume_result(result)
+    else:
+        for application_index, application in enumerate(applications):
+            try:
+                pseudo_reaction_smiles = compose_pseudo_reaction_smiles(
+                    application.target_smiles,
+                    application.composite_rule,
+                )
+                extracted = extractor.extract(pseudo_reaction_smiles)
+                if extracted is None:
+                    result = {
+                        "status": "skipped_rule_extraction",
+                        "application": application,
+                        "pseudo_reaction_smiles": pseudo_reaction_smiles,
+                    }
+                else:
+                    result = {
+                        "status": "ok",
+                        "application": application,
+                        "pseudo_reaction_smiles": pseudo_reaction_smiles,
+                        "rule_smarts": extracted.rule_smarts,
+                    }
+            except Exception as exc:
+                if isinstance(exc, RuleApplicationError):
+                    result = {
+                        "status": "skipped_unwrap",
+                        "application": application,
+                        "error": collection_error_row(
+                            application,
+                            stage="skipped_unwrap",
+                            exc=exc,
+                        ),
+                    }
+                elif is_standardization_error(exc):
+                    result = {
+                        "status": "skipped_rule_extraction_error",
+                        "application": application,
+                    }
+                else:
+                    result = {
+                        "status": "error",
+                        "application": application,
+                        "error": {
+                            **collection_error_row(
+                                application,
+                                stage="error",
+                                exc=exc,
+                            ),
+                            "error_type": type(exc).__qualname__,
+                            "message": str(exc)
+                            or traceback.format_exc(limit=1).strip(),
+                        },
+                    }
+            consume_result(result)
+
+    if progress_interval and stats.applications_seen % progress_interval:
+        print(
+            "processed applications="
+            f"{stats.applications_seen} alchemical_rules={len(aggregates)} "
+            f"skipped_unwrap={stats.skipped_unwrap_applications} "
+            f"errors={stats.errors}",
+            flush=True,
+        )
 
     return aggregates, pseudo_reactions, stats, errors
 
@@ -509,6 +687,8 @@ def run(args: argparse.Namespace) -> int:
         limit_applications=args.limit_applications,
         ignore_errors=args.ignore_errors,
         progress_interval=args.progress_interval,
+        n_cpu=args.n_cpu,
+        extractor_args=args,
     )
 
     rules_path, smi_path, summary_path, error_path = resolve_alchemical_output_paths(
@@ -537,6 +717,7 @@ def run(args: argparse.Namespace) -> int:
         "skipped_rule_extraction_errors": stats.skipped_rule_extraction_errors,
         "errors": stats.errors,
         "unique_alchemical_rules": len(aggregates),
+        "n_cpu": normalize_n_cpu(args.n_cpu),
         **output_stats,
     }
     write_json(summary_path, summary)

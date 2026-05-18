@@ -3,20 +3,20 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "composite-rules"
+name = "route-inspector"
 version = "0.1.0"
-description = "Extract SynPlanner/chython composite rules from PaRoutes-style route trees."
+description = "Inspect SynPlanner/chython route rules, alchemical rules, scoring, and protection strategies."
 requires-python = ">=3.11"
 
 [project.scripts]
-alchems = "alchems.cli:main"
-analyze-protection = "alchems.cli:analyze_protection"
-classify-alchemical-rules = "alchems.cli:classify_alchemical_rules"
-collect-alchemical-rules = "alchems.cli:extract_alchemical_rules"
-extract-composite-rules = "alchems.cli:extract_composite_rules"
-score-composite-overlap = "alchems.cli:score_composite_overlap"
-unwrap-composite-rule = "alchems.cli:unwrap_composite_rule"
-unwrap-alchemical-rule = "alchems.cli:unwrap_alchemical_rule"
+route-inspector = "route_analysis.cli:main"
+analyze-protection = "route_analysis.cli:analyze_protection"
+classify-alchemical-rules = "route_analysis.cli:classify_alchemical_rules"
+collect-alchemical-rules = "route_analysis.cli:extract_alchemical_rules"
+extract-composite-rules = "route_analysis.cli:extract_composite_rules"
+score-composite-overlap = "route_analysis.cli:score_composite_overlap"
+unwrap-composite-rule = "route_analysis.cli:unwrap_composite_rule"
+unwrap-alchemical-rule = "route_analysis.cli:unwrap_alchemical_rule"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,4 +1,4 @@
-from alchems.composite_rules.unwrap import split_composite_rule, unwrap_composite_rule
+from route_analysis.composite_rules.unwrap import split_composite_rule, unwrap_composite_rule
 
 
 def test_split_composite_rule_strips_empty_parts():

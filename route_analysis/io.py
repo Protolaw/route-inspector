@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import os
 import re
@@ -44,6 +45,15 @@ def setup_runtime_cache_dirs() -> None:
     Path(os.environ["XDG_CACHE_HOME"]).mkdir(parents=True, exist_ok=True)
 
 
+def normalize_n_cpu(n_cpu: int | None) -> int:
+    if n_cpu is None:
+        return 1
+    n_cpu = int(n_cpu)
+    if n_cpu == 0:
+        return os.cpu_count() or 1
+    return max(1, n_cpu)
+
+
 def resolve_existing_path(path: str | Path) -> Path:
     path = Path(path).expanduser()
     if path.exists() or path.is_absolute():
@@ -59,8 +69,14 @@ def resolve_existing_path(path: str | Path) -> Path:
     return path
 
 
+def open_text(path: Path):
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8")
+    return path.open(encoding="utf-8")
+
+
 def read_json(path: Path) -> Any:
-    with path.open(encoding="utf-8") as file:
+    with open_text(path) as file:
         return json.load(file)
 
 
@@ -181,22 +197,27 @@ def write_composite_rules(
             sequences_by_size[size],
             key=lambda item: (-len(item[1]), "$".join(item[0])),
         )
-        size_output = output_prefix.with_name(
-            f"{output_prefix.name}_t{size}_composite_rules"
-        ).with_suffix(output_suffix)
+        if size == 1:
+            size_output = output_prefix.with_name(
+                f"{output_prefix.name}_t1_single_rules"
+            ).with_suffix(output_suffix)
+            header = ["Rule", "popularity", "Reference", "Target_molecules"]
+        else:
+            size_output = output_prefix.with_name(
+                f"{output_prefix.name}_t{size}_composite_rules"
+            ).with_suffix(output_suffix)
+            header = [
+                "Composite_rule",
+                "output_reactants_num",
+                "popularity",
+                "Reference",
+                "Target_molecules",
+            ]
         output_paths[size] = size_output
         counts_by_size[size] = len(rows)
         with size_output.open("w", newline="", encoding="utf-8") as file:
             writer = csv.writer(file, delimiter="\t", lineterminator="\n")
-            writer.writerow(
-                [
-                    "Composite_rule",
-                    "popularity",
-                    "route_ids_size",
-                    "Reference",
-                    "Target_molecules",
-                ]
-            )
+            writer.writerow(header)
             for sequence, references in rows:
                 sorted_references = sorted(references, key=reference_sort_key)
                 target_molecules: list[str] = []
@@ -211,20 +232,36 @@ def write_composite_rules(
                             ):
                                 seen_target_molecules.add(target_smiles)
                                 target_molecules.append(target_smiles)
-                writer.writerow(
-                    [
-                        "$".join(sequence),
-                        len(references),
-                        len(references),
-                        ",".join(map(str, sorted_references)),
-                        ",".join(target_molecules),
-                    ]
-                )
+                if size == 1:
+                    writer.writerow(
+                        [
+                            sequence[0],
+                            len(references),
+                            ",".join(map(str, sorted_references)),
+                            ",".join(target_molecules),
+                        ]
+                    )
+                else:
+                    writer.writerow(
+                        [
+                            "$".join(sequence),
+                            composite_output_reactants_num(sequence),
+                            len(references),
+                            ",".join(map(str, sorted_references)),
+                            ",".join(target_molecules),
+                        ]
+                    )
 
     return {
         "output_files": {str(size): str(path) for size, path in output_paths.items()},
-        "unique_composite_rules_by_size": {
+        "unique_rules_by_size": {
             str(size): counts_by_size[size] for size in sorted(counts_by_size)
+        },
+        "unique_single_rules": counts_by_size.get(1, 0),
+        "unique_composite_rules_by_size": {
+            str(size): counts_by_size[size]
+            for size in sorted(counts_by_size)
+            if size > 1
         },
     }
 
@@ -392,7 +429,7 @@ def resolve_alchemical_output_paths(
 def iter_composite_rule_applications(
     tsv_paths: Iterable[Path],
 ) -> Iterable[CompositeRuleApplication]:
-    from alchems.composite_rules.unwrap import split_composite_rule
+    from route_analysis.composite_rules.unwrap import split_composite_rule
 
     for tsv_path in tsv_paths:
         with tsv_path.open(encoding="utf-8") as file:
@@ -456,6 +493,17 @@ def reaction_output_reactants_num(rule_smarts: str) -> int:
     if not separator:
         return 0
     return len([part for part in right.split(".") if part.strip()])
+
+
+def composite_output_reactants_num(sequence: Iterable[str]) -> int:
+    """Estimate final leaf count after applying a linear composite rule sequence."""
+
+    total = 1
+    seen_any = False
+    for rule_smarts in sequence:
+        seen_any = True
+        total += max(reaction_output_reactants_num(rule_smarts), 1) - 1
+    return total if seen_any else 0
 
 
 def write_alchemical_rules_tsv(

@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from alchems.io import (
+from route_analysis.io import (
     read_composite_rule_from_tsv,
     setup_runtime_cache_dirs,
     write_json,
