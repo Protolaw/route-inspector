@@ -12,7 +12,11 @@ from chython.containers.bonds import DynamicBond
 
 
 def route_smi_2_cgr(pathway, reverse=False): # True for AiZynthFInder, False for ASKCOS
-    """Converts a pathway of SMILES strings to a list of CGRs."""
+    """Return route SMI 2 CGR from a normalized route tree.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     cgr_pathway = []
     inversed_pathway = pathway[::-1] if reverse else pathway
     for reaction_str in inversed_pathway:
@@ -56,6 +60,11 @@ def find_remap(lst):
     return dict(zip(out_of_range, missing))
 
 def _atom_symbol(atom):
+    """Return the element symbol for a chython atom-like object.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     for attr in ("symbol", "atomic_symbol", "element"):
         val = getattr(atom, attr, None)
         if not val:
@@ -71,6 +80,11 @@ def _atom_symbol(atom):
     return name
 
 def _atom_hcount(atom):
+    """Return the hydrogen count for a chython atom-like object.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     for attr in ("implicit_hydrogens", "hydrogens", "h", "hydrogen_count"):
         val = getattr(atom, attr, None)
         if val is None:
@@ -85,6 +99,11 @@ def _atom_hcount(atom):
     return 0
 
 def _bond_order(bond):
+    """Return the numeric bond order for a chython bond-like object.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     for attr in ("order", "p_order"):
         val = getattr(bond, attr, None)
         if isinstance(val, int):
@@ -92,6 +111,11 @@ def _bond_order(bond):
     return None
 
 def _is_nitrogen(atom):
+    """Return whether nitrogen matches the expected condition.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     num = getattr(atom, "atomic_number", None)
     if num is None:
         num = getattr(atom, "number", None)
@@ -100,6 +124,11 @@ def _is_nitrogen(atom):
     return _atom_symbol(atom) == "N"
 
 def _is_oxygen(atom):
+    """Return whether oxygen matches the expected condition.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     num = getattr(atom, "atomic_number", None)
     if num is None:
         num = getattr(atom, "number", None)
@@ -108,6 +137,11 @@ def _is_oxygen(atom):
     return _atom_symbol(atom) == "O"
 
 def _is_carbonyl_carbon(mol, atom_num):
+    """Return whether carbonyl carbon matches the expected condition.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     atom = mol._atoms.get(atom_num)
     if not atom or _atom_symbol(atom) != "C":
         return False
@@ -121,6 +155,11 @@ def _is_carbonyl_carbon(mol, atom_num):
     return False
 
 def _amide_by_carbonyl(mol):
+    """Map amide nitrogens to neighboring carbonyl carbons.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     bonds = getattr(mol, "_bonds", {})
     mapping = {}
     for c_num, atom in mol._atoms.items():
@@ -138,6 +177,11 @@ def _amide_by_carbonyl(mol):
     return mapping
 
 def _select_n_attached_carbon(mol, n_num):
+    """Select n attached carbon for the next processing step.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     bonds = getattr(mol, "_bonds", {})
     candidates = []
     for nbr, bond in bonds.get(n_num, {}).items():
@@ -158,6 +202,11 @@ def _select_n_attached_carbon(mol, n_num):
     return min(nbr for _, nbr in candidates)
 
 def _expand_mapping_with_substructure(prod_mol, cand_mol, mapping, prod_n=None, cand_n=None):
+    """Expand a partial atom mapping with substructure matches.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     try:
         mapping_iter = cand_mol.get_mapping(prod_mol)
     except Exception:
@@ -185,6 +234,11 @@ def _expand_mapping_with_substructure(prod_mol, cand_mol, mapping, prod_n=None, 
     return mapping, added
 
 def _has_dynamic_bond_4_0(cgr):
+    """Return whether the input contains dynamic bond 4 0.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     for m_bond in cgr._bonds.values():
         for bond in m_bond.values():
             if isinstance(bond, DynamicBond) and bond.order == 4 and bond.p_order in (None, 0):
@@ -192,6 +246,11 @@ def _has_dynamic_bond_4_0(cgr):
     return False
 
 def _amide_nitrogens(mol):
+    """Return atom IDs that behave as amide nitrogens.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     bonds = getattr(mol, "_bonds", {})
     amide_nums = []
     for num, atom in mol._atoms.items():
@@ -206,6 +265,11 @@ def _amide_nitrogens(mol):
     return amide_nums
 
 def _amine_nitrogens(mol, amide_nums):
+    """Return atom IDs that behave as free amine nitrogens.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     amine_nums = {}
     for num, atom in mol._atoms.items():
         if not _is_nitrogen(atom) or num in amide_nums:
@@ -217,12 +281,22 @@ def _amine_nitrogens(mol, amide_nums):
     return amine_nums
 
 def _prep_molecules(molecules):
+    """Normalize molecules before comparing route-step fragments.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     for mol in molecules:
         mol.kekule()
         mol.implicify_hydrogens()
         mol.thiele()
 
 def _find_transamidation_swap(reaction, *, expand=False):
+    """Find transamidation swap if a valid match exists.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     _prep_molecules(list(reaction.reactants) + list(reaction.products))
     react_amide_by_c = {}
     react_c_idx = {}
@@ -290,6 +364,11 @@ def _find_transamidation_swap(reaction, *, expand=False):
     return None
 
 def _remap_product_atoms(reaction, mapping):
+    """Remap product atoms with globally consistent atom IDs.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     if not mapping:
         return False
     for prod in reaction.products:
@@ -308,6 +387,11 @@ def _remap_product_atoms(reaction, mapping):
     return False
 
 def process_single_route(cgr_pathway, check_trans_error=True):
+    """Process single route and return serializable results.
+
+    These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+    SynPlanner/chython CGR containers without changing the caller-facing format.
+    """
     for i, reaction in enumerate(cgr_pathway):
         if check_trans_error:
             swap_cgr = reaction.compose()
@@ -330,7 +414,7 @@ def process_single_route(cgr_pathway, check_trans_error=True):
             curr_product.kekule()
             curr_product.implicify_hydrogens()
             curr_product.thiele()
-            
+
             for reactant in decomposed.reactants:
                 reactant.kekule()
                 reactant.implicify_hydrogens()
@@ -363,10 +447,20 @@ def process_single_route(cgr_pathway, check_trans_error=True):
 
 
 def _is_route_tree(value: Any) -> bool:
+   """Return whether route tree matches the expected condition.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    return isinstance(value, dict) and value.get("type") == "mol"
 
 
 def _route_smiles(record: Any) -> str | None:
+   """Return route SMILES from a normalized route tree.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    tree = _route_tree(record)
    if isinstance(tree, dict):
        return tree.get("smiles")
@@ -374,6 +468,11 @@ def _route_smiles(record: Any) -> str | None:
 
 
 def _route_tree(record: Any) -> dict[str, Any]:
+   """Return route tree from a normalized route tree.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    if _is_route_tree(record):
        return record
    if isinstance(record, dict) and _is_route_tree(record.get("dict")):
@@ -382,6 +481,11 @@ def _route_tree(record: Any) -> dict[str, Any]:
 
 
 def _route_id(record: Any, fallback: int) -> Any:
+   """Return route ID from a normalized route tree.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    if isinstance(record, dict):
        for key in ("route_id", "id", "index"):
            if key in record:
@@ -390,6 +494,11 @@ def _route_id(record: Any, fallback: int) -> Any:
 
 
 def _normalise_route_record(record: Any, fallback_id: int) -> dict[str, Any]:
+   """Normalize route record for route-inspector processing.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    tree = _route_tree(record)
    if isinstance(record, dict) and "dict" in record:
        normalised = dict(record)
@@ -447,6 +556,11 @@ def iter_route_records(route_collections: Any) -> Iterable[dict[str, Any]]:
 
 
 def _reaction_smiles(node: dict[str, Any]) -> str:
+   """Return reaction SMILES from a reaction or route node.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    metadata = node.get("metadata") or {}
    return (
        node.get("smiles")
@@ -458,6 +572,11 @@ def _reaction_smiles(node: dict[str, Any]) -> str:
 
 
 def _route_fingerprint(node: dict[str, Any]) -> tuple[Any, ...]:
+   """Return route fingerprint from a normalized route tree.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    node_type = node.get("type")
    children = tuple(_route_fingerprint(child) for child in node.get("children", []) or [])
    if node_type == "reaction":
@@ -466,10 +585,19 @@ def _route_fingerprint(node: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def normalise_route_tree_for_chython(route: dict[str, Any], *, copy_route: bool = True) -> dict[str, Any]:
-   """Return a PaRoutes tree whose reaction ``smiles`` fields chython can read."""
+   """Normalize route tree for chython for route-inspector processing.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    route = copy.deepcopy(route) if copy_route else route
 
    def visit(node: dict[str, Any]) -> None:
+       """Visit one route-tree node during recursive route traversal.
+
+       These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+       SynPlanner/chython CGR containers without changing the caller-facing format.
+       """
        if node.get("type") == "reaction":
            smiles = _reaction_smiles(node)
            if not smiles:
@@ -484,11 +612,20 @@ def normalise_route_tree_for_chython(route: dict[str, Any], *, copy_route: bool 
 
 
 def route_tree_to_reactions_dict(route: dict[str, Any]) -> dict[int, ReactionContainer]:
-   """Convert a PaRoutes tree to ``{step_id: ReactionContainer}`` in synthesis order."""
+   """Return route tree to reactions dict from a normalized route tree.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    route = normalise_route_tree_for_chython(route)
    reactions = []
 
    def visit(node: dict[str, Any]) -> None:
+       """Visit one route-tree node during recursive route traversal.
+
+       These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+       SynPlanner/chython CGR containers without changing the caller-facing format.
+       """
        for child in node.get("children", []) or []:
            if isinstance(child, dict):
                visit(child)
@@ -500,12 +637,20 @@ def route_tree_to_reactions_dict(route: dict[str, Any]) -> dict[int, ReactionCon
 
 
 def route_tree_to_reactions_list(route: dict[str, Any]) -> list[ReactionContainer]:
-   """Convert a PaRoutes tree to a synthesis-ordered list of mapped reactions."""
+   """Return route tree to reactions list from a normalized route tree.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    return [reaction for _, reaction in sorted(route_tree_to_reactions_dict(route).items())]
 
 
 def filter_unique_routes(route_collections: Any) -> list[dict[str, Any]]:
-   """Filter raw PaRoutes JSON or RouteCollection-like data to unique routes."""
+   """Remove duplicate route trees while preserving route records.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    seen_hashes = set()
    unique_records = []
 
@@ -521,7 +666,11 @@ def filter_unique_routes(route_collections: Any) -> list[dict[str, Any]]:
 
 
 def extract_pathway_aizynthfinder(node, parent_smiles=None):
-   """Recursively extracts a pathway from a reaction tree node."""
+   """Extract pathway aizynthfinder from mapped route data.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    pathway = []
    if node.get('type') == 'reaction':
        for child in node.get('children', []):
@@ -537,6 +686,11 @@ def extract_pathway_aizynthfinder(node, parent_smiles=None):
 
 
 def extract_one_route_cgr(data, check_trans_error=True, use_mapped_reaction_smiles=True):
+   """Extract one route CGR from mapped route data.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    root = _route_tree(data)
    if use_mapped_reaction_smiles:
        reactions = route_tree_to_reactions_list(root)
@@ -555,6 +709,11 @@ def extract_all_route_cgrs(
    progress_interval=0,
    use_mapped_reaction_smiles=True,
 ):
+   """Extract all route cgrs from mapped route data.
+
+   These utilities bridge PaRoutes JSON, older RouteCollection-like inputs, and
+   SynPlanner/chython CGR containers without changing the caller-facing format.
+   """
    route_cgrs_dict = {}
    errors = []
    for i, data in enumerate(iter_route_records(route_collection)):

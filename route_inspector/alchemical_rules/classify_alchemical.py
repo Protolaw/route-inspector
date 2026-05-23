@@ -12,8 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from route_analysis.alchemical_rules.alchemical import rule_cgr_key
-from route_analysis.io import (
+from route_inspector.alchemical_rules.alchemical import rule_cgr_key
+from route_inspector.io import (
     default_classification_output_path,
     default_classification_summary_path,
     normalize_n_cpu,
@@ -23,11 +23,17 @@ from route_analysis.io import (
     rule_column,
     setup_runtime_cache_dirs,
     write_json,
+    write_standard_sidecars,
     write_tsv,
 )
 
 
 def _rule_cgr_worker(item: tuple[int, str]) -> tuple[int, str, str, str]:
+    """Run the worker entry point for rule CGR.
+
+    Classification compares each alchemical QueryCGR against default one-step rules,
+    then writes positive and negative rule sets for scoring.
+    """
     index, smarts = item
     try:
         return index, smarts, rule_cgr_key(smarts), ""
@@ -40,6 +46,11 @@ def load_default_rule_cgrs(
     *,
     n_cpu: int = 1,
 ) -> tuple[dict[str, list[tuple[int, str]]], int, int]:
+    """Load default rule cgrs from configured sources.
+
+    Classification compares each alchemical QueryCGR against default one-step rules,
+    then writes positive and negative rule sets for scoring.
+    """
     default_rules: dict[str, list[tuple[int, str]]] = defaultdict(list)
     parsed = 0
     errors = 0
@@ -82,6 +93,11 @@ def classify_alchemical_rules(
     *,
     n_cpu: int = 1,
 ) -> dict[str, Any]:
+    """Classify alchemical rules against reference rules.
+
+    Classification compares each alchemical QueryCGR against default one-step rules,
+    then writes positive and negative rule sets for scoring.
+    """
     alchemical_rules_tsv = resolve_existing_path(alchemical_rules_tsv)
     default_rules_tsv = resolve_existing_path(default_rules_tsv)
     output, summary_path = resolve_classification_output_paths(
@@ -191,10 +207,23 @@ def classify_alchemical_rules(
 
 
 def run(args: argparse.Namespace) -> int:
+    """Run this module command with parsed CLI arguments.
+
+    Classification compares each alchemical QueryCGR against default one-step rules,
+    then writes positive and negative rule sets for scoring.
+    """
     setup_runtime_cache_dirs()
-    output = args.output or default_classification_output_path(args.alchemical_rules_tsv)
+    if getattr(args, "output", None) is None:
+        if getattr(args, "output_dir", None) is None:
+            output = default_classification_output_path(args.alchemical_rules_tsv)
+        else:
+            output = args.output_dir
+    elif getattr(args, "output_dir", None) is not None:
+        raise ValueError("--output and --output-dir cannot be used together")
+    else:
+        output = args.output
     summary_path = args.summary or (
-        args.output if args.output else default_classification_summary_path(output)
+        output if (getattr(args, "output_dir", None) is not None) else default_classification_summary_path(output)
     )
     summary = classify_alchemical_rules(
         resolve_existing_path(args.alchemical_rules_tsv),
@@ -203,5 +232,21 @@ def run(args: argparse.Namespace) -> int:
         summary_path,
         n_cpu=args.n_cpu,
     )
+    sidecars = write_standard_sidecars(
+        Path(summary["output"]).parent,
+        command_name="classify-alchemical-rules",
+        summary=summary,
+        errors=[],
+        input_files=[args.alchemical_rules_tsv, args.default_rules_tsv],
+        output_files={
+            "classified_alchemical_rules": summary["output"],
+            "positive": summary["positive_output"],
+            "negative": summary["negative_output"],
+            "summary": summary["summary_file"],
+        },
+        cli_args=args,
+    )
+    summary["sidecar_files"] = sidecars
+    write_json(Path(summary["summary_file"]), summary)
     print(json.dumps(summary, indent=2), flush=True)
     return 0

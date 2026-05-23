@@ -1,8 +1,8 @@
 import csv
 import json
 
-from route_analysis.composite_rules.extract import RouteProcessingStats
-from route_analysis.scoring import overlap
+from route_inspector.composite_rules.extract import RouteProcessingStats
+from route_inspector.scoring import overlap
 
 
 def test_score_composite_rule_overlap_reports_order_sensitive_matches(

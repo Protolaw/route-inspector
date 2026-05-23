@@ -3,6 +3,11 @@ from lazy_object_proxy import Proxy
 
 
 def _rules():
+    """Return the project-local protecting-group rule table.
+
+    The copied rule table keeps project-specific protecting-group definitions available
+    even when the installed chython package changes.
+    """
     from chython import smarts
 
     rules = {}

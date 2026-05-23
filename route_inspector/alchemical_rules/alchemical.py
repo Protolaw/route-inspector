@@ -14,12 +14,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from route_analysis.composite_rules.unwrap import (
+from route_inspector.composite_rules.unwrap import (
     RuleApplicationError,
     split_composite_rule,
     unwrap_rule_sequence,
 )
-from route_analysis.io import (
+from route_inspector.io import (
     expand_composite_rule_tsv_paths,
     iter_composite_rule_applications,
     normalize_n_cpu,
@@ -30,6 +30,7 @@ from route_analysis.io import (
     write_alchemical_rules_tsv,
     write_json,
     write_pseudo_reactions_smi,
+    write_standard_sidecars,
 )
 
 
@@ -82,6 +83,11 @@ class AlchemicalCollectionStats:
 
 
 def is_standardization_error(exc: Exception) -> bool:
+    """Return whether standardization error matches the expected condition.
+
+    This step supports alchemical rule extraction from composite-rule applications and
+    keeps duplicate rules merged by structural identity.
+    """
     return type(exc).__name__ == "StandardizationError"
 
 
@@ -89,6 +95,11 @@ def compose_pseudo_reaction_smiles(
     target_smiles: str,
     composite_rule: str,
 ) -> str:
+    """Compose pseudo reaction SMILES from normalized inputs.
+
+    The pseudo-reaction collapses an unwrapped route into target-to-stock reactants
+    before SynPlanner rule extraction is run again.
+    """
     from chython.containers.reaction import ReactionContainer
 
     unwrapped = unwrap_rule_sequence(
@@ -113,6 +124,11 @@ def normalize_pseudo_reaction_mapping(
     reactants: Iterable[Any],
     product: Any,
 ) -> tuple[list[Any], Any]:
+    """Normalize pseudo reaction mapping for route-inspector processing.
+
+    The pseudo-reaction collapses an unwrapped route into target-to-stock reactants
+    before SynPlanner rule extraction is run again.
+    """
     product = product.copy()
     product_atoms = {
         atom_number: atom.atomic_number for atom_number, atom in product.atoms()
@@ -154,6 +170,11 @@ def normalize_pseudo_reaction_mapping(
 
 
 def rule_query_cgr(rule_smarts: str) -> Any:
+    """Return rule query CGR used for rule extraction or comparison.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     from chython import smarts
     from chython.containers.reaction import ReactionContainer
     from chython.reactor import Reactor
@@ -170,6 +191,11 @@ def rule_query_cgr(rule_smarts: str) -> Any:
 
 
 def rule_cgr_key(rule_smarts: str) -> str:
+    """Return rule CGR key used for rule extraction or comparison.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     return json.dumps(
         query_cgr_coarse_signature(rule_query_cgr(rule_smarts)),
         sort_keys=True,
@@ -178,6 +204,11 @@ def rule_cgr_key(rule_smarts: str) -> str:
 
 
 def freeze_query_value(value: Any) -> Any:
+    """Convert query value into a hashable representation.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     if isinstance(value, (tuple, list)):
         return tuple(freeze_query_value(item) for item in value)
     if isinstance(value, set):
@@ -188,6 +219,11 @@ def freeze_query_value(value: Any) -> Any:
 
 
 def query_atom_signature(atom: Any) -> tuple[Any, ...]:
+    """Return query atom signature used for structural rule comparison.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     return (
         atom.atomic_number,
         repr(freeze_query_value(atom.charge)),
@@ -203,6 +239,11 @@ def query_atom_signature(atom: Any) -> tuple[Any, ...]:
 
 
 def query_bond_signature(bond: Any) -> tuple[Any, ...]:
+    """Return query bond signature used for structural rule comparison.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     return (
         repr(freeze_query_value(bond.order)),
         repr(freeze_query_value(bond.p_order)),
@@ -210,6 +251,11 @@ def query_bond_signature(bond: Any) -> tuple[Any, ...]:
 
 
 def query_cgr_adjacency(query_cgr: Any) -> dict[int, dict[int, tuple[Any, ...]]]:
+    """Return query CGR adjacency used for structural rule comparison.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     adjacency = {atom_number: {} for atom_number, _atom in query_cgr.atoms()}
     for atom_1, atom_2, bond in query_cgr.bonds():
         signature = query_bond_signature(bond)
@@ -219,6 +265,11 @@ def query_cgr_adjacency(query_cgr: Any) -> dict[int, dict[int, tuple[Any, ...]]]
 
 
 def query_cgr_coarse_signature(query_cgr: Any) -> tuple[Any, ...]:
+    """Return query CGR coarse signature used for structural rule comparison.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     atom_signatures = {
         atom_number: query_atom_signature(atom)
         for atom_number, atom in query_cgr.atoms()
@@ -234,6 +285,11 @@ def query_cgr_coarse_signature(query_cgr: Any) -> tuple[Any, ...]:
 
 
 def query_cgr_isomorphic(left: Any, right: Any) -> bool:
+    """Return query CGR isomorphic used for structural rule comparison.
+
+    The comparison uses composed QueryCGR structure rather than raw SMARTS strings,
+    which avoids treating equivalent atom-map numbering as different.
+    """
     if left.atoms_count != right.atoms_count:
         return False
     if left.bonds_count != right.bonds_count:
@@ -271,6 +327,11 @@ def query_cgr_isomorphic(left: Any, right: Any) -> bool:
     used_right_atoms: set[int] = set()
 
     def mapping_is_consistent(left_atom: int, right_atom: int) -> bool:
+        """Return whether a candidate atom mapping is consistent with prior matches.
+
+        This step supports alchemical rule extraction from composite-rule applications
+        and keeps duplicate rules merged by structural identity.
+        """
         for mapped_left_atom, mapped_right_atom in mapping.items():
             left_bond = left_adjacency[left_atom].get(mapped_left_atom)
             right_bond = right_adjacency[right_atom].get(mapped_right_atom)
@@ -281,6 +342,11 @@ def query_cgr_isomorphic(left: Any, right: Any) -> bool:
         return True
 
     def search(index: int) -> bool:
+        """Search candidate atom mappings recursively.
+
+        This step supports alchemical rule extraction from composite-rule applications
+        and keeps duplicate rules merged by structural identity.
+        """
         if index == len(order):
             return True
         left_atom = order[index]
@@ -304,6 +370,11 @@ def matching_aggregate(
     aggregate_buckets: dict[tuple[Any, ...], list[AlchemicalRuleAggregate]],
     query_cgr: Any,
 ) -> AlchemicalRuleAggregate | None:
+    """Find an existing alchemical aggregate with an isomorphic QueryCGR.
+
+    The aggregation links each alchemical rule back to the composite rules, targets, and
+    route IDs that produced it.
+    """
     for aggregate in aggregate_buckets.get(query_cgr_coarse_signature(query_cgr), []):
         if aggregate.query_cgr is not None and query_cgr_isomorphic(
             aggregate.query_cgr,
@@ -320,6 +391,11 @@ def collection_error_row(
     exc: Exception,
     alchemical_rule: str = "",
 ) -> dict[str, Any]:
+    """Build a TSV row describing a failed alchemical-rule application.
+
+    This step supports alchemical rule extraction from composite-rule applications and
+    keeps duplicate rules merged by structural identity.
+    """
     return {
         "source_tsv": str(application.source_tsv),
         "row_index": application.row_index,
@@ -332,11 +408,21 @@ def collection_error_row(
 
 class AlchemicalRuleExtractor:
     def __init__(self, config: Any):
+        """Initialize this object with its resolved configuration.
+
+        This step supports alchemical rule extraction from composite-rule applications
+        and keeps duplicate rules merged by structural identity.
+        """
         self.config = config
         self.cache: dict[str, ExtractedAlchemicalRule | None] = {}
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "AlchemicalRuleExtractor":
+        """Build an extractor instance from parsed CLI arguments.
+
+        This step supports alchemical rule extraction from composite-rule applications
+        and keeps duplicate rules merged by structural identity.
+        """
         from synplan.utils.config import RuleExtractionConfig
 
         if args.config:
@@ -359,6 +445,11 @@ class AlchemicalRuleExtractor:
         return cls(config)
 
     def extract(self, reaction_smiles: str) -> ExtractedAlchemicalRule | None:
+        """Extract one rule from a mapped reaction SMILES string.
+
+        This step supports alchemical rule extraction from composite-rule applications
+        and keeps duplicate rules merged by structural identity.
+        """
         if reaction_smiles in self.cache:
             return self.cache[reaction_smiles]
 
@@ -389,6 +480,11 @@ class AlchemicalRuleExtractor:
 
 
 def alchemical_extractor_args_dict(args: argparse.Namespace) -> dict[str, Any]:
+    """Serialize alchemical extractor settings for worker initialization.
+
+    This step supports alchemical rule extraction from composite-rule applications and
+    keeps duplicate rules merged by structural identity.
+    """
     return {
         "config": str(args.config) if getattr(args, "config", None) else None,
         "environment_atom_count": getattr(args, "environment_atom_count", 1),
@@ -400,6 +496,11 @@ def alchemical_extractor_args_dict(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _init_alchemical_worker(extractor_args: dict[str, Any]) -> None:
+    """Run the worker entry point for init alchemical.
+
+    This step supports alchemical rule extraction from composite-rule applications and
+    keeps duplicate rules merged by structural identity.
+    """
     global _ALCHEMICAL_WORKER_EXTRACTOR
     setup_runtime_cache_dirs()
     _ALCHEMICAL_WORKER_EXTRACTOR = AlchemicalRuleExtractor.from_args(
@@ -408,6 +509,11 @@ def _init_alchemical_worker(extractor_args: dict[str, Any]) -> None:
 
 
 def _alchemical_application_worker(item: tuple[int, Any]) -> dict[str, Any]:
+    """Run the worker entry point for alchemical application.
+
+    This step supports alchemical rule extraction from composite-rule applications and
+    keeps duplicate rules merged by structural identity.
+    """
     _application_index, application = item
     try:
         if _ALCHEMICAL_WORKER_EXTRACTOR is None:
@@ -462,6 +568,11 @@ def select_composite_rule_applications(
     limit_rows: int | None = None,
     limit_applications: int | None = None,
 ) -> tuple[list[Any], int]:
+    """Select composite rule applications for the next processing step.
+
+    The aggregation links each alchemical rule back to the composite rules, targets, and
+    route IDs that produced it.
+    """
     applications = []
     rows_seen: set[tuple[Path, int]] = set()
     composite_rows_seen = 0
@@ -487,6 +598,11 @@ def merge_alchemical_success(
     aggregate_buckets: dict[tuple[Any, ...], list[AlchemicalRuleAggregate]],
     pseudo_reactions: list[PseudoReactionRecord],
 ) -> None:
+    """Merge alchemical success into aggregate results.
+
+    The aggregation links each alchemical rule back to the composite rules, targets, and
+    route IDs that produced it.
+    """
     query_cgr = rule_query_cgr(rule_smarts)
     cgr_key = rule_cgr_key(rule_smarts)
     aggregate = matching_aggregate(aggregate_buckets, query_cgr)
@@ -541,6 +657,11 @@ def collect_alchemical_rules(
     AlchemicalCollectionStats,
     list[dict[str, Any]],
 ]:
+    """Collect alchemical rules from route-analysis input data.
+
+    The aggregation links each alchemical rule back to the composite rules, targets, and
+    route IDs that produced it.
+    """
     aggregates: dict[str, AlchemicalRuleAggregate] = {}
     aggregate_buckets: dict[tuple[Any, ...], list[AlchemicalRuleAggregate]] = {}
     pseudo_reactions: list[PseudoReactionRecord] = []
@@ -554,6 +675,11 @@ def collect_alchemical_rules(
     n_cpu = normalize_n_cpu(n_cpu)
 
     def consume_result(result: dict[str, Any]) -> None:
+        """Merge one worker result into the aggregate state.
+
+        This step supports alchemical rule extraction from composite-rule applications
+        and keeps duplicate rules merged by structural identity.
+        """
         application = result["application"]
         stats.applications_seen += 1
         status = result["status"]
@@ -677,7 +803,18 @@ def collect_alchemical_rules(
 
 
 def run(args: argparse.Namespace) -> int:
+    """Run this module command with parsed CLI arguments.
+
+    This step supports alchemical rule extraction from composite-rule applications and
+    keeps duplicate rules merged by structural identity.
+    """
     setup_runtime_cache_dirs()
+    if getattr(args, "output", None) is None:
+        if getattr(args, "output_dir", None) is None:
+            raise ValueError("either --output or --output-dir is required")
+        args.output = args.output_dir
+    elif getattr(args, "output_dir", None) is not None:
+        raise ValueError("--output and --output-dir cannot be used together")
     composite_rule_tsvs = expand_composite_rule_tsv_paths(args.composite_rule_tsv)
     extractor = AlchemicalRuleExtractor.from_args(args)
     aggregates, pseudo_reactions, stats, errors = collect_alchemical_rules(
@@ -722,6 +859,23 @@ def run(args: argparse.Namespace) -> int:
     }
     write_json(summary_path, summary)
     summary["summary_file"] = str(summary_path)
+    write_json(summary_path, summary)
+    sidecars = write_standard_sidecars(
+        rules_path.parent,
+        command_name="extract-alchemical-rules",
+        summary=summary,
+        errors=errors,
+        input_files=composite_rule_tsvs,
+        output_files={
+            "alchemical_rules": rules_path,
+            "pseudo_reactions_smi": smi_path,
+            "summary": summary_path,
+            "errors": error_path,
+        },
+        config_path=getattr(args, "config", None),
+        cli_args=args,
+    )
+    summary["sidecar_files"] = sidecars
     write_json(summary_path, summary)
     print(json.dumps(summary, indent=2), flush=True)
     return 0

@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from route_analysis.composite_rules.unwrap import unwrap_rule_sequence
-from route_analysis.io import (
+from route_inspector.composite_rules.unwrap import unwrap_rule_sequence
+from route_inspector.io import (
     read_alchemical_rule_from_tsv,
     resolve_existing_path,
     setup_runtime_cache_dirs,
@@ -27,6 +27,11 @@ def unwrap_alchemical_rule(
     route_id: int = 0,
     mark_leaves_in_stock: bool = True,
 ) -> dict[int, dict[str, Any]]:
+    """Unwrap alchemical rule into a retrosynthetic route.
+
+    The alchemical rule is treated as a one-step retrosynthetic template so the
+    generated route matches the reactants produced during extraction.
+    """
     return unwrap_rule_sequence(
         target_smiles,
         [alchemical_rule],
@@ -37,6 +42,11 @@ def unwrap_alchemical_rule(
 
 
 def run(args: argparse.Namespace) -> int:
+    """Run this module command with parsed CLI arguments.
+
+    The alchemical rule is treated as a one-step retrosynthetic template so the
+    generated route matches the reactants produced during extraction.
+    """
     setup_runtime_cache_dirs()
 
     alchemical_rule = args.alchemical_rule

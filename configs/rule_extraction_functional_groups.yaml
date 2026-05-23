@@ -38,7 +38,7 @@ func_groups_list:
   - '[B,C](F)(F)F'
 atom_info_retention:
   reaction_center:
-    neighbors: true
+    neighbors: false
     implicit_hydrogens: false
     ring_sizes: false
   environment:

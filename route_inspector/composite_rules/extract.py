@@ -17,11 +17,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from route_analysis.io import (
+from route_inspector.io import (
+    dataset_prefix_from_path,
     normalize_n_cpu,
     open_text,
     resolve_existing_path,
+    resolve_output_path,
     setup_runtime_cache_dirs,
+    write_standard_sidecars,
     write_composite_errors as write_errors,
     write_composite_routes_without_rules,
     write_composite_rules,
@@ -69,6 +72,11 @@ class RuleExtractionError(Exception):
 
 
 def reaction_smiles_from_node(node: dict[str, Any]) -> str:
+    """Read reaction SMILES stored on a route node.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     metadata = node.get("metadata") or {}
     smiles = (
         node.get("smiles")
@@ -83,12 +91,22 @@ def reaction_smiles_from_node(node: dict[str, Any]) -> str:
 
 @lru_cache(maxsize=8192)
 def parse_route_reaction(reaction_smiles: str) -> Any:
+    """Parse route reaction into chython/SynPlanner objects.
+
+    It operates on PaRoutes route trees after atom-map normalization, which keeps
+    reaction centers comparable across convergent route branches.
+    """
     from chython import smiles as parse_smiles
 
     return parse_smiles(reaction_smiles)
 
 
 def route_reaction_atom_ids(reaction: Any) -> set[int]:
+    """Return route reaction atom IDs from a normalized route tree.
+
+    It operates on PaRoutes route trees after atom-map normalization, which keeps
+    reaction centers comparable across convergent route branches.
+    """
     atom_ids: set[int] = set()
     for molecule in reaction.reactants + reaction.products + reaction.reagents:
         atom_ids.update(int(atom_id) for atom_id in molecule)
@@ -96,6 +114,11 @@ def route_reaction_atom_ids(reaction: Any) -> set[int]:
 
 
 def same_route_molecule(left: Any, right: Any) -> bool:
+    """Return whether two inputs represent the same route molecule.
+
+    It operates on PaRoutes route trees after atom-map normalization, which keeps
+    reaction centers comparable across convergent route branches.
+    """
     if left.atoms_count != right.atoms_count or left.bonds_count != right.bonds_count:
         return False
     try:
@@ -124,6 +147,11 @@ def same_route_molecule(left: Any, right: Any) -> bool:
 
 
 def remap_route_molecule(molecule: Any, mapping: dict[int, int]) -> Any:
+    """Remap route molecule with globally consistent atom IDs.
+
+    It operates on PaRoutes route trees after atom-map normalization, which keeps
+    reaction centers comparable across convergent route branches.
+    """
     molecule_copy = molecule.copy()
     molecule_mapping = {
         atom_id: mapping[atom_id]
@@ -136,6 +164,11 @@ def remap_route_molecule(molecule: Any, mapping: dict[int, int]) -> Any:
 
 
 def remap_route_reaction(reaction: Any, mapping: dict[int, int]) -> Any:
+    """Remap route reaction with globally consistent atom IDs.
+
+    It operates on PaRoutes route trees after atom-map normalization, which keeps
+    reaction centers comparable across convergent route branches.
+    """
     from chython.containers import ReactionContainer
 
     return ReactionContainer(
@@ -148,11 +181,21 @@ def remap_route_reaction(reaction: Any, mapping: dict[int, int]) -> Any:
 
 
 def molecule_node_smiles(node: dict[str, Any]) -> str:
+    """Return molecule node SMILES from a molecule or molecule node.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     metadata = node.get("metadata") or {}
     return node.get("smiles") or metadata.get("smiles") or ""
 
 
 def set_molecule_node_mapped_smiles(node: dict[str, Any], molecule: Any) -> None:
+    """Set molecule node mapped SMILES on a route-tree node.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     metadata = node.setdefault("metadata", {})
     metadata.setdefault("original_smiles", molecule_node_smiles(node))
     metadata["mapped_smiles"] = format(molecule, "m")
@@ -166,6 +209,11 @@ def find_route_side_molecule(
     fallback_smiles: str = "",
     excluded_indexes: set[int] | None = None,
 ) -> tuple[int, Any] | tuple[None, None]:
+    """Find route side molecule if a valid match exists.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     excluded = excluded_indexes or set()
     reference_molecule = reference
     if reference_molecule is None and fallback_smiles:
@@ -202,6 +250,11 @@ def normalize_route_tree(route: dict[str, Any]) -> dict[str, Any]:
     all_original_atom_ids: set[int] = set()
 
     def collect_original_atom_ids(node: dict[str, Any]) -> None:
+        """Collect original atom IDs from route-analysis input data.
+
+        It operates on PaRoutes route trees after atom-map normalization, which keeps
+        reaction centers comparable across convergent route branches.
+        """
         if node.get("type") == "reaction":
             node["smiles"] = reaction_smiles_from_node(node)
             try:
@@ -219,6 +272,11 @@ def normalize_route_tree(route: dict[str, Any]) -> dict[str, Any]:
     next_atom_id = max(all_original_atom_ids or {0}) + 1
 
     def fresh_atom_id() -> int:
+        """Return the next unused atom-map number for a normalized route branch.
+
+        It operates on PaRoutes route trees after atom-map normalization, which keeps
+        reaction centers comparable across convergent route branches.
+        """
         nonlocal next_atom_id
         while next_atom_id in used_atom_ids:
             next_atom_id += 1
@@ -228,6 +286,11 @@ def normalize_route_tree(route: dict[str, Any]) -> dict[str, Any]:
         return atom_id
 
     def complete_mapping(reaction: Any, alignment: dict[int, int]) -> dict[int, int]:
+        """Complete an atom-map alignment with fresh IDs for newly introduced atoms.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         mapping: dict[int, int] = dict(alignment)
         for target_atom_id in alignment.values():
             used_atom_ids.add(int(target_atom_id))
@@ -243,6 +306,11 @@ def normalize_route_tree(route: dict[str, Any]) -> dict[str, Any]:
         return mapping
 
     def visit_molecule(node: dict[str, Any], expected_molecule: Any | None = None) -> None:
+        """Visit one molecule during recursive route traversal.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         if expected_molecule is not None:
             set_molecule_node_mapped_smiles(node, expected_molecule)
 
@@ -292,6 +360,11 @@ def normalize_route_tree(route: dict[str, Any]) -> dict[str, Any]:
         reaction_node: dict[str, Any],
         reaction: Any | None = None,
     ) -> None:
+        """Visit one reaction children during recursive route traversal.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         if reaction is None:
             try:
                 reaction = parse_route_reaction(reaction_smiles_from_node(reaction_node))
@@ -321,6 +394,11 @@ def normalize_route_tree(route: dict[str, Any]) -> dict[str, Any]:
 
 
 def route_items(routes_json: Any) -> Iterable[tuple[Any, dict[str, Any]]]:
+    """Return route items from a normalized route tree.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     if isinstance(routes_json, list):
         for route_id, route in enumerate(routes_json):
             yield route_id, route
@@ -335,6 +413,11 @@ def route_items(routes_json: Any) -> Iterable[tuple[Any, dict[str, Any]]]:
 
 
 def child_reaction_nodes(reaction_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return reaction children directly below a route reaction node.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     children = []
     for mol_node in reaction_node.get("children", []) or []:
         if mol_node.get("type") != "mol":
@@ -346,6 +429,11 @@ def child_reaction_nodes(reaction_node: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def root_reaction_nodes(route: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return top-level reaction nodes below the target molecule.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     return [
         child
         for child in route.get("children", []) or []
@@ -354,6 +442,11 @@ def root_reaction_nodes(route: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def route_target_smiles(route: dict[str, Any]) -> str:
+    """Return route target SMILES from a normalized route tree.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     metadata = route.get("metadata") or {}
     return metadata.get("original_smiles") or route.get("smiles") or metadata.get("smiles") or ""
 
@@ -362,6 +455,11 @@ def reaction_paths_from_node(
     reaction_node: dict[str, Any],
     step_by_reaction_smiles: dict[str, ReactionRuleStep],
 ) -> list[list[ReactionRuleStep]]:
+    """Read reaction paths stored on a route node.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     step = step_by_reaction_smiles[reaction_smiles_from_node(reaction_node)]
     children = child_reaction_nodes(reaction_node)
     if not children:
@@ -376,6 +474,11 @@ def reaction_paths_from_node(
 
 @lru_cache(maxsize=8192)
 def parse_route_molecule(molecule_smiles: str) -> Any:
+    """Parse route molecule into chython/SynPlanner objects.
+
+    It operates on PaRoutes route trees after atom-map normalization, which keeps
+    reaction centers comparable across convergent route branches.
+    """
     from chython import smiles as parse_smiles
 
     return parse_smiles(molecule_smiles)
@@ -385,6 +488,11 @@ def side_center_molecules(
     molecules: Iterable[Any],
     center_atoms: frozenset[int],
 ) -> tuple[MoleculeCenterProjection, ...]:
+    """Find reactant or product molecules that contain reaction-center atoms.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     projections = []
     for molecule in molecules:
         molecule_center_atoms = center_atoms & set(molecule)
@@ -401,6 +509,11 @@ def project_side_centers_to_route_molecule(
     side_molecules: tuple[MoleculeCenterProjection, ...],
     route_molecule_smiles: str,
 ) -> tuple[frozenset[int], bool]:
+    """Project side centers to route molecule onto the route molecule being compared.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     route_molecule = parse_route_molecule(route_molecule_smiles)
     projected_center_atoms: set[int] = set()
     matched_route_molecule = False
@@ -424,6 +537,11 @@ def projected_center_atoms_touch(
     left_centers: frozenset[int],
     right_centers: frozenset[int],
 ) -> bool:
+    """Project center atoms touch onto the route molecule being compared.
+
+    It operates on PaRoutes route trees after atom-map normalization, which keeps
+    reaction centers comparable across convergent route branches.
+    """
     if left_centers & right_centers:
         return True
 
@@ -448,6 +566,11 @@ def projected_center_components(
     route_molecule_smiles: str,
     center_atoms: frozenset[int],
 ) -> list[frozenset[int]]:
+    """Project center components onto the route molecule being compared.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     route_molecule = parse_route_molecule(route_molecule_smiles)
     remaining = set(center_atoms)
     components: list[frozenset[int]] = []
@@ -476,6 +599,11 @@ def touches_all_center_components(
     left_centers: frozenset[int],
     right_centers: frozenset[int],
 ) -> bool:
+    """Return whether all center components touches every required center.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     components = projected_center_components(route_molecule_smiles, right_centers)
     if len(components) <= 1:
         return True
@@ -486,6 +614,11 @@ def touches_all_center_components(
 
 
 def center_contact_allowed(route_molecule: Any, atom_1: int, atom_2: int) -> bool:
+    """Return whether two projected center atoms can link a composite sequence.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     atomic_numbers = {
         atom_number: atom.atomic_number for atom_number, atom in route_molecule.atoms()
     }
@@ -504,6 +637,11 @@ def center_contact_allowed(route_molecule: Any, atom_1: int, atom_2: int) -> boo
 
 
 def is_carbonyl_carbon(route_molecule: Any, atom_number: int) -> bool:
+    """Return whether carbonyl carbon matches the expected condition.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     atom = route_molecule.atom(atom_number)
     if atom.atomic_number != 6:
         return False
@@ -515,6 +653,11 @@ def is_carbonyl_carbon(route_molecule: Any, atom_number: int) -> bool:
 
 
 def adjacent_centers_overlap(left: ReactionRuleStep, right: ReactionRuleStep) -> bool:
+    """Return whether adjacent route steps share a compatible reaction center.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     if (
         right.target_smiles
         and left.reactant_center_molecules
@@ -552,6 +695,11 @@ def is_excluded_adjacent_pair(
     left: ReactionRuleStep,
     right: ReactionRuleStep,
 ) -> bool:
+    """Return whether excluded adjacent pair matches the expected condition.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     return (
         is_sulfonyl_ester_activation_rule(left.rule_smarts)
         and is_alcohol_ester_deprotection_rule(right.rule_smarts)
@@ -559,6 +707,11 @@ def is_excluded_adjacent_pair(
 
 
 def is_sulfonyl_ester_activation_rule(rule_smarts: str) -> bool:
+    """Return whether sulfonyl ester activation rule matches the expected condition.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     left, _, right = rule_smarts.partition(">>")
     return (
         "-[O;D2" in left
@@ -569,6 +722,11 @@ def is_sulfonyl_ester_activation_rule(rule_smarts: str) -> bool:
 
 
 def is_alcohol_ester_deprotection_rule(rule_smarts: str) -> bool:
+    """Return whether alcohol ester deprotection rule matches the expected condition.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     left, _, right = rule_smarts.partition(">>")
     return (
         "-[O;D1" in left
@@ -583,6 +741,11 @@ def valid_composite_sequences(
     min_length: int,
     max_length: int | None,
 ) -> Iterable[tuple[str, ...]]:
+    """Return ordered rule sequences that satisfy the composite-rule definition.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     for sequence, _target_smiles in valid_composite_sequence_occurrences(
         path,
         min_length=min_length,
@@ -597,6 +760,11 @@ def valid_composite_sequence_occurrences(
     min_length: int,
     max_length: int | None,
 ) -> Iterable[tuple[tuple[str, ...], str]]:
+    """Return valid composite-rule occurrences with their source step indices.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     if len(path) < min_length:
         return
 
@@ -605,6 +773,11 @@ def valid_composite_sequence_occurrences(
     def emit_segment(
         steps: list[ReactionRuleStep],
     ) -> Iterable[tuple[tuple[str, ...], str]]:
+        """Emit one contiguous ordered segment from a candidate route path.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         if len(steps) < min_length:
             return
         upper = len(steps) if max_length is None else min(len(steps), max_length)
@@ -627,8 +800,13 @@ def valid_composite_sequence_occurrences(
 
 @lru_cache(maxsize=32768)
 def rule_querycgr_identity(rule_smarts: str) -> str:
+    """Return rule QueryCGR identity used for rule extraction or comparison.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     try:
-        from route_analysis.alchemical_rules.alchemical import (
+        from route_inspector.alchemical_rules.alchemical import (
             query_cgr_coarse_signature,
             rule_query_cgr,
         )
@@ -640,6 +818,11 @@ def rule_querycgr_identity(rule_smarts: str) -> str:
 
 
 def composite_sequence_identity(sequence: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the structural identity tuple for a composite-rule sequence.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     return tuple(rule_querycgr_identity(rule_smarts) for rule_smarts in sequence)
 
 
@@ -650,6 +833,11 @@ def merge_composite_sequences_by_querycgr(
     dict[tuple[str, ...], set[Any]],
     dict[tuple[str, ...], dict[Any, set[str]]],
 ]:
+    """Merge composite sequences by QueryCGR into aggregate results.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     representative_by_identity: dict[tuple[str, ...], tuple[str, ...]] = {}
     references_out: dict[tuple[str, ...], set[Any]] = defaultdict(set)
     targets_out: dict[tuple[str, ...], dict[Any, set[str]]] = defaultdict(
@@ -671,6 +859,11 @@ def merge_composite_sequences_by_querycgr(
 
 class SynPlannerRuleExtractor:
     def __init__(self, config: Any):
+        """Initialize this object with its resolved configuration.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         from synplan.chem.data.standardizing import RemoveReagentsStandardizer
 
         self.config = config
@@ -679,6 +872,11 @@ class SynPlannerRuleExtractor:
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "SynPlannerRuleExtractor":
+        """Build an extractor instance from parsed CLI arguments.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         from synplan.utils.config import RuleExtractionConfig
 
         if args.config:
@@ -699,7 +897,11 @@ class SynPlannerRuleExtractor:
         return cls(config)
 
     def extract(self, reaction_smiles: str) -> tuple[ReactionRuleStep | None, bool]:
-        """Return `(step, cache_hit)` for one mapped reaction SMILES."""
+        """Extract one rule from a mapped reaction SMILES string.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
 
         if reaction_smiles in self.cache:
             return self.cache[reaction_smiles], True
@@ -749,6 +951,11 @@ SerializedReactionRuleStep = dict[str, Any]
 def serialize_center_projection(
     projection: MoleculeCenterProjection,
 ) -> tuple[str, tuple[int, ...]]:
+    """Serialize center projection for worker-safe transport.
+
+    Serialization keeps rule-step metadata small enough to pass through worker processes
+    and stable enough for later TSV aggregation.
+    """
     return (
         format(projection.molecule, "m"),
         tuple(sorted(projection.center_atoms)),
@@ -758,6 +965,11 @@ def serialize_center_projection(
 def deserialize_center_projection(
     serialized: tuple[str, tuple[int, ...]],
 ) -> MoleculeCenterProjection:
+    """Deserialize center projection from worker output.
+
+    Serialization keeps rule-step metadata small enough to pass through worker processes
+    and stable enough for later TSV aggregation.
+    """
     molecule_smiles, center_atoms = serialized
     return MoleculeCenterProjection(
         molecule=parse_route_molecule(molecule_smiles),
@@ -768,6 +980,11 @@ def deserialize_center_projection(
 def serialize_reaction_rule_step(
     step: ReactionRuleStep,
 ) -> SerializedReactionRuleStep:
+    """Serialize reaction rule step for worker-safe transport.
+
+    Serialization keeps rule-step metadata small enough to pass through worker processes
+    and stable enough for later TSV aggregation.
+    """
     return {
         "rule_smarts": step.rule_smarts,
         "center_atoms": tuple(sorted(step.center_atoms)),
@@ -786,6 +1003,11 @@ def serialize_reaction_rule_step(
 def deserialize_reaction_rule_step(
     serialized: SerializedReactionRuleStep,
 ) -> ReactionRuleStep:
+    """Deserialize reaction rule step from worker output.
+
+    Serialization keeps rule-step metadata small enough to pass through worker processes
+    and stable enough for later TSV aggregation.
+    """
     return ReactionRuleStep(
         rule_smarts=serialized["rule_smarts"],
         center_atoms=frozenset(serialized["center_atoms"]),
@@ -807,11 +1029,21 @@ class PrecomputedRuleExtractor:
         serialized_steps_by_reaction: dict[str, SerializedReactionRuleStep | None],
         errors_by_reaction: dict[str, dict[str, str]] | None = None,
     ):
+        """Initialize this object with its resolved configuration.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         self.serialized_steps_by_reaction = serialized_steps_by_reaction
         self.errors_by_reaction = errors_by_reaction or {}
         self.cache: dict[str, ReactionRuleStep | None] = {}
 
     def extract(self, reaction_smiles: str) -> tuple[ReactionRuleStep | None, bool]:
+        """Extract one rule from a mapped reaction SMILES string.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         if reaction_smiles in self.errors_by_reaction:
             error = self.errors_by_reaction[reaction_smiles]
             raise RuleExtractionError(
@@ -830,9 +1062,19 @@ class PrecomputedRuleExtractor:
 
 
 def collect_reaction_contexts(route: dict[str, Any]) -> list[tuple[str, str]]:
+    """Collect reaction contexts from route-analysis input data.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     contexts: list[tuple[str, str]] = []
 
     def visit(node: dict[str, Any]) -> None:
+        """Visit one route-tree node during recursive route traversal.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         if node.get("type") == "mol":
             target_smiles = node.get("smiles", "")
             for child in node.get("children", []) or []:
@@ -847,6 +1089,11 @@ def collect_reaction_contexts(route: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def collect_reaction_smiles(route: dict[str, Any]) -> list[str]:
+    """Collect reaction SMILES from route-analysis input data.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     return [reaction_smiles for reaction_smiles, _ in collect_reaction_contexts(route)]
 
 
@@ -858,6 +1105,11 @@ def extract_route_rule_sequences(
     max_length: int | None,
     stats: RouteProcessingStats,
 ) -> tuple[dict[tuple[str, ...], set[str]], dict[tuple[str, ...], set[str]]]:
+    """Extract route rule sequences from mapped route data.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     route = normalize_route_tree(route)
     step_by_reaction_smiles: dict[str, ReactionRuleStep] = {}
     single_rules: dict[tuple[str, ...], set[str]] = defaultdict(set)
@@ -906,6 +1158,11 @@ def extract_route_composites(
     max_length: int | None,
     stats: RouteProcessingStats,
 ) -> dict[tuple[str, ...], set[str]]:
+    """Extract route composites from mapped route data.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     sequences, _single_rules = extract_route_rule_sequences(
         route,
         rule_extractor,
@@ -923,6 +1180,11 @@ def no_composite_reason(
     skipped_reactions: int,
     min_length: int,
 ) -> str:
+    """Explain why a processed route produced no composite rules.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     if reactions_seen == 0:
         return "no_reactions"
     if extracted_reaction_rules == 0 and skipped_reactions:
@@ -933,6 +1195,11 @@ def no_composite_reason(
 
 
 def rule_extractor_args_dict(args: argparse.Namespace) -> dict[str, Any]:
+    """Return rule extractor args dict used for rule extraction or comparison.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     return {
         "config": str(args.config) if getattr(args, "config", None) else None,
         "environment_atom_count": getattr(args, "environment_atom_count", 1),
@@ -947,6 +1214,11 @@ def limited_route_items(
     routes_json: Any,
     limit: int | None,
 ) -> list[tuple[Any, dict[str, Any]]]:
+    """Yield route items after applying the optional route limit.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     items = []
     for index, item in enumerate(route_items(routes_json), start=1):
         if limit is not None and index > limit:
@@ -978,12 +1250,22 @@ def iter_route_items_from_json_file(
         eof = False
 
         def compact_buffer() -> None:
+            """Discard consumed text from the streaming JSON parser buffer.
+
+            The helper feeds rule extraction, center-overlap filtering, or final TSV
+            aggregation without changing the original route JSON in place.
+            """
             nonlocal buffer, position
             if position:
                 buffer = buffer[position:]
                 position = 0
 
         def read_more() -> None:
+            """Read the next chunk for streaming JSON parsing.
+
+            The helper feeds rule extraction, center-overlap filtering, or final TSV
+            aggregation without changing the original route JSON in place.
+            """
             nonlocal buffer, eof
             compact_buffer()
             chunk = file.read(chunk_size)
@@ -993,10 +1275,20 @@ def iter_route_items_from_json_file(
                 eof = True
 
         def ensure_buffer() -> None:
+            """Fill the streaming JSON parser buffer before decoding continues.
+
+            The helper feeds rule extraction, center-overlap filtering, or final TSV
+            aggregation without changing the original route JSON in place.
+            """
             if position >= len(buffer) and not eof:
                 read_more()
 
         def skip_whitespace() -> None:
+            """Advance the streaming JSON parser past insignificant whitespace.
+
+            The helper feeds rule extraction, center-overlap filtering, or final TSV
+            aggregation without changing the original route JSON in place.
+            """
             nonlocal position
             while True:
                 ensure_buffer()
@@ -1006,6 +1298,11 @@ def iter_route_items_from_json_file(
                     return
 
         def expect_character(expected: str) -> None:
+            """Consume the expected character from the streaming JSON parser.
+
+            The helper feeds rule extraction, center-overlap filtering, or final TSV
+            aggregation without changing the original route JSON in place.
+            """
             nonlocal position
             skip_whitespace()
             ensure_buffer()
@@ -1017,6 +1314,11 @@ def iter_route_items_from_json_file(
             position += 1
 
         def decode_next() -> Any:
+            """Decode the next route object from the streaming JSON parser.
+
+            The helper feeds rule extraction, center-overlap filtering, or final TSV
+            aggregation without changing the original route JSON in place.
+            """
             nonlocal position
             skip_whitespace()
             while True:
@@ -1098,6 +1400,11 @@ def chunked_route_items(
     items: Iterable[tuple[Any, dict[str, Any]]],
     chunk_size: int,
 ) -> Iterable[list[tuple[Any, dict[str, Any]]]]:
+    """Yield route items in chunks suitable for worker processes.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     chunk: list[tuple[Any, dict[str, Any]]] = []
     for item in items:
         chunk.append(item)
@@ -1112,6 +1419,11 @@ def merge_route_processing_stats(
     target: RouteProcessingStats,
     source: RouteProcessingStats,
 ) -> None:
+    """Merge route processing stats into aggregate results.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     target.routes_seen += source.routes_seen
     target.routes_with_composites += source.routes_with_composites
     target.reactions_seen += source.reactions_seen
@@ -1130,6 +1442,11 @@ def process_route_for_composites(
     max_length: int | None,
     store_route_without_composites: bool = True,
 ) -> dict[str, Any]:
+    """Process route for composites and return serializable results.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     stats = RouteProcessingStats(routes_seen=1)
     route_sequences, single_rules = extract_route_rule_sequences(
         route,
@@ -1178,6 +1495,11 @@ def _init_composite_worker(
     max_length: int | None,
     store_routes_without_composites: bool,
 ) -> None:
+    """Run the worker entry point for init composite.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     global _COMPOSITE_WORKER_EXTRACTOR
     global _COMPOSITE_WORKER_MIN_LENGTH
     global _COMPOSITE_WORKER_MAX_LENGTH
@@ -1194,6 +1516,11 @@ def _init_composite_worker(
 
 
 def _composite_route_worker(item: tuple[Any, dict[str, Any]]) -> dict[str, Any]:
+    """Run the worker entry point for composite route.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     route_id, route = item
     try:
         if _COMPOSITE_WORKER_EXTRACTOR is None:
@@ -1228,6 +1555,11 @@ def _composite_route_worker(item: tuple[Any, dict[str, Any]]) -> dict[str, Any]:
 def _composite_route_chunk_worker(
     items: list[tuple[Any, dict[str, Any]]],
 ) -> list[dict[str, Any]]:
+    """Run the worker entry point for composite route chunk.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     return [_composite_route_worker(item) for item in items]
 
 
@@ -1238,6 +1570,11 @@ def _init_precomputed_composite_worker(
     max_length: int | None,
     store_routes_without_composites: bool,
 ) -> None:
+    """Run the worker entry point for init precomputed composite.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     global _COMPOSITE_WORKER_EXTRACTOR
     global _COMPOSITE_WORKER_MIN_LENGTH
     global _COMPOSITE_WORKER_MAX_LENGTH
@@ -1255,6 +1592,11 @@ def _init_precomputed_composite_worker(
 
 
 def _unique_reaction_worker(reaction_smiles: str) -> dict[str, Any]:
+    """Run the worker entry point for unique reaction.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     try:
         if _COMPOSITE_WORKER_EXTRACTOR is None:
             raise RuntimeError("unique reaction worker was not initialized")
@@ -1284,10 +1626,20 @@ def route_result_chunks_from_pool(
     worker_chunksize: int,
     max_pending_chunks: int,
 ) -> Iterable[list[dict[str, Any]]]:
+    """Return route result chunks from pool from a normalized route tree.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     chunks = iter(chunked_route_items(route_items_iter, worker_chunksize))
     pending = set()
 
     def submit_until_full() -> None:
+        """Submit route-processing jobs until the worker queue reaches capacity.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         while len(pending) < max_pending_chunks:
             try:
                 chunk = next(chunks)
@@ -1310,6 +1662,11 @@ def collect_unique_normalized_reactions(
     stats: RouteProcessingStats,
     errors: list[dict[str, Any]],
 ) -> tuple[set[str], set[Any]]:
+    """Collect unique normalized reactions from route-analysis input data.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     unique_reactions: set[str] = set()
     failed_route_ids: set[Any] = set()
 
@@ -1364,6 +1721,11 @@ def extract_unique_reaction_rules(
     dict[str, dict[str, str]],
     dict[str, int],
 ]:
+    """Extract unique reaction rules from mapped route data.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     reaction_smiles_list = sorted(reaction_smiles_values)
     serialized_steps_by_reaction: dict[str, SerializedReactionRuleStep | None] = {}
     errors_by_reaction: dict[str, dict[str, str]] = {}
@@ -1375,6 +1737,11 @@ def extract_unique_reaction_rules(
     }
 
     def consume_result(result: dict[str, Any], index: int) -> None:
+        """Merge one worker result into the aggregate state.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         reaction_smiles = result["reaction_smiles"]
         error = result.get("error")
         if error:
@@ -1457,6 +1824,11 @@ def filtered_route_items_from_json_file(
     limit: int | None,
     failed_route_ids: set[Any],
 ) -> Iterable[tuple[Any, dict[str, Any]]]:
+    """Stream route items from JSON while applying optional route-ID filters.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     for route_id, route in iter_route_items_from_json_file(path, limit):
         if route_id in failed_route_ids:
             continue
@@ -1477,6 +1849,11 @@ def consume_composite_route_result(
     routes_without_composites: dict[Any, dict[str, Any]],
     routes_without_composites_by_reason: dict[str, int],
 ) -> None:
+    """Explain the consume composite route result helper used by route analysis.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     merge_route_processing_stats(stats, result["stats"])
     error = result.get("error")
     if error:
@@ -1532,6 +1909,11 @@ def write_composite_extraction_outputs(
     extraction_mode: str,
     extra_summary: dict[str, Any] | None = None,
 ) -> int:
+    """Write composite extraction outputs to disk.
+
+    The result preserves reaction order and the shared-center constraint used to decide
+    whether adjacent route steps form a valid composite rule.
+    """
     references_for_output, target_molecules_for_output = (
         merge_composite_sequences_by_querycgr(
             references_by_sequence,
@@ -1613,12 +1995,46 @@ def write_composite_extraction_outputs(
     summary_path = write_summary(args.output, summary)
     summary["summary_file"] = str(summary_path)
     write_summary(args.output, summary)
+    sidecars = write_standard_sidecars(
+        args.output.parent,
+        command_name="extract-composite-rules",
+        summary=summary,
+        errors=errors,
+        input_files=[args.routes_json],
+        output_files={
+            **output_summary.get("output_files", {}),
+            "summary": summary_path,
+            "routes_without_composite_rules": routes_without_composites_path or "",
+        },
+        config_path=getattr(args, "config", None),
+        cli_args=args,
+    )
+    summary["sidecar_files"] = sidecars
+    write_summary(args.output, summary)
 
     print(json.dumps(summary, indent=2), flush=True)
     return 0
 
 
+def resolve_composite_output_args(args: argparse.Namespace) -> None:
+    """Resolve --output or --output-dir into the existing output-prefix argument."""
+    if getattr(args, "output", None) is None:
+        dataset = dataset_prefix_from_path(args.routes_json)
+        args.output = resolve_output_path(
+            output=None,
+            output_dir=getattr(args, "output_dir", None),
+            default_filename=f"{dataset}.tsv",
+        )
+    elif getattr(args, "output_dir", None) is not None:
+        raise ValueError("--output and --output-dir cannot be used together")
+
+
 def empty_collection_state() -> dict[str, Any]:
+    """Create empty aggregate containers for composite-rule collection.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     return {
         "references_by_sequence": defaultdict(set),
         "target_molecules_by_sequence": defaultdict(lambda: defaultdict(set)),
@@ -1639,6 +2055,11 @@ def run_unique_reactions_first(
     max_pending_chunks: int,
     store_routes_without_composites: bool,
 ) -> int:
+    """Run unique reactions first using configured inputs.
+
+    Worker-safe inputs and outputs are used here so large route collections can be
+    processed either serially or with `--n_cpu` parallelism.
+    """
     state = empty_collection_state()
     unique_reactions, failed_route_ids = collect_unique_normalized_reactions(
         args,
@@ -1785,7 +2206,13 @@ def run_unique_reactions_first(
 
 
 def run(args: argparse.Namespace) -> int:
+    """Run this module command with parsed CLI arguments.
+
+    The helper feeds rule extraction, center-overlap filtering, or final TSV aggregation
+    without changing the original route JSON in place.
+    """
     setup_runtime_cache_dirs()
+    resolve_composite_output_args(args)
     if args.min_length < 2:
         raise ValueError("--min-length must be at least 2")
     if args.max_length is not None and args.max_length <= 0:
@@ -1828,6 +2255,11 @@ def run(args: argparse.Namespace) -> int:
     stats = RouteProcessingStats()
 
     def consume_result(result: dict[str, Any], index: int) -> None:
+        """Merge one worker result into the aggregate state.
+
+        The helper feeds rule extraction, center-overlap filtering, or final TSV
+        aggregation without changing the original route JSON in place.
+        """
         merge_route_processing_stats(stats, result["stats"])
         error = result.get("error")
         if error:

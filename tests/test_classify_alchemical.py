@@ -1,6 +1,6 @@
 import csv
 
-from route_analysis.alchemical_rules.classify_alchemical import classify_alchemical_rules
+from route_inspector.alchemical_rules.classify_alchemical import classify_alchemical_rules
 
 
 def test_classify_alchemical_rules_marks_default_cgr_matches_negative(tmp_path):

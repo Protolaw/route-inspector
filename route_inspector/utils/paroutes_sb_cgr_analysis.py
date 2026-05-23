@@ -23,6 +23,11 @@ from utils.cgr_process import (
 
 
 def _load_routes(path: Path, limit: int | None = None):
+    """Load routes from configured sources.
+
+    The helper is used by validation scripts that convert PaRoutes examples into route
+    CGRs and single-bond CGRs under the SynPlanner environment.
+    """
     with path.open() as file:
         routes = json.load(file)
     if limit is not None:
@@ -31,33 +36,63 @@ def _load_routes(path: Path, limit: int | None = None):
 
 
 def _record_tree(record):
+    """Return the route tree stored in a PaRoutes record.
+
+    The helper is used by validation scripts that convert PaRoutes examples into route
+    CGRs and single-bond CGRs under the SynPlanner environment.
+    """
     return record["dict"] if isinstance(record, dict) and "dict" in record else record
 
 
 def _record_id(record, fallback):
+    """Return the route identifier stored in a PaRoutes record.
+
+    The helper is used by validation scripts that convert PaRoutes examples into route
+    CGRs and single-bond CGRs under the SynPlanner environment.
+    """
     if isinstance(record, dict):
         return record.get("route_id", fallback)
     return fallback
 
 
 def _target_atom_count(record):
+    """Count atoms in the target molecule of a normalized route record.
+
+    The helper is used by validation scripts that convert PaRoutes examples into route
+    CGRs and single-bond CGRs under the SynPlanner environment.
+    """
     tree = _record_tree(record)
     return len(smiles_chython(tree["smiles"]))
 
 
 def _strip_tracebacks(errors):
+    """Remove traceback text from collected validation errors.
+
+    The helper is used by validation scripts that convert PaRoutes examples into route
+    CGRs and single-bond CGRs under the SynPlanner environment.
+    """
     for error in errors:
         error.pop("traceback", None)
     return errors
 
 
 def _write_json(path: Path, data):
+    """Write JSON to disk.
+
+    The helper is used by validation scripts that convert PaRoutes examples into route
+    CGRs and single-bond CGRs under the SynPlanner environment.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as file:
         json.dump(data, file, indent=2)
 
 
 def run(args):
+    """Run this module command with parsed CLI arguments.
+
+    The helper is used by validation scripts that convert PaRoutes examples into route
+    CGRs and single-bond CGRs under the SynPlanner environment.
+    """
     routes = _load_routes(args.routes_json, args.limit)
     input_count = len(routes)
 

@@ -5,17 +5,35 @@ import gzip
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 
+STAGE_DIRS = {
+    "preprocess": "00_preprocess",
+    "composite_rules": "10_composite_rules",
+    "alchemical_rules": "20_alchemical_rules",
+    "alchemical_classification": "30_alchemical_classification",
+    "scoring": "40_scoring",
+    "protection_analysis": "50_protection_analysis",
+}
+
 
 def increase_csv_field_limit() -> None:
+    """Raise the CSV parser field limit for large SMARTS and route fields.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     limit = sys.maxsize
     while True:
         try:
@@ -39,6 +57,11 @@ class CompositeRuleApplication:
 
 
 def setup_runtime_cache_dirs() -> None:
+    """Create runtime cache directories used by plotting and chemistry dependencies.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib-codex")
     os.environ.setdefault("XDG_CACHE_HOME", "/private/tmp/codex-cache")
     Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
@@ -46,6 +69,11 @@ def setup_runtime_cache_dirs() -> None:
 
 
 def normalize_n_cpu(n_cpu: int | None) -> int:
+    """Normalize n CPU for route-inspector processing.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     if n_cpu is None:
         return 1
     n_cpu = int(n_cpu)
@@ -55,6 +83,11 @@ def normalize_n_cpu(n_cpu: int | None) -> int:
 
 
 def resolve_existing_path(path: str | Path) -> Path:
+    """Resolve output path information for resolve existing path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     path = Path(path).expanduser()
     if path.exists() or path.is_absolute():
         return path
@@ -70,17 +103,32 @@ def resolve_existing_path(path: str | Path) -> Path:
 
 
 def open_text(path: Path):
+    """Open a plain-text or gzip-compressed file for reading.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     if path.suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8")
     return path.open(encoding="utf-8")
 
 
 def read_json(path: Path) -> Any:
+    """Read JSON data from a plain or gzip-compressed file.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     with open_text(path) as file:
         return json.load(file)
 
 
 def read_tsv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Read a TSV header and row dictionaries from a tab-separated file.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     increase_csv_field_limit()
     with path.open(encoding="utf-8") as file:
         reader = csv.DictReader(file, delimiter="\t")
@@ -92,6 +140,11 @@ def write_tsv(
     fieldnames: list[str],
     rows: Iterable[dict[str, Any]],
 ) -> None:
+    """Write TSV to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(
@@ -105,24 +158,231 @@ def write_tsv(
 
 
 def write_json(path: Path, data: Any) -> None:
+    """Write JSON to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=2)
 
 
+def json_safe(value: Any) -> Any:
+    """Return a JSON-serializable representation of common CLI values."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    return str(value)
+
+
+def dataset_prefix_from_path(path: str | Path) -> str:
+    """Infer a compact dataset prefix from route or artifact paths."""
+    path = Path(path)
+    stem = path.stem
+    for pattern in (
+        r"[-_]?routes$",
+        r"_classified_alchemical_rules$",
+        r"_alchemical_rules$",
+        r"_alchemical_reactions$",
+        r"_alchemical_rule_collection_summary$",
+        r"_alchemical_rule_collection_errors$",
+        r"_alchemical_rule_classification_summary$",
+        r"_composite_rule_extraction_summary$",
+        r"_routes_without_composite_rules$",
+        r"_t\d+_composite_rules$",
+        r"_t\d+_single_rules$",
+        r"_protection_.+$",
+    ):
+        stem = re.sub(pattern, "", stem)
+    return stem or path.stem or "dataset"
+
+
+def stage_output_dir(output_root: Path, dataset: str, stage: str) -> Path:
+    """Return the standard dataset-first, stage-second output directory."""
+    stage_name = STAGE_DIRS.get(stage, stage)
+    return Path(output_root).expanduser() / dataset / stage_name
+
+
+def resolve_output_path(
+    *,
+    output: Path | None,
+    output_dir: Path | None,
+    default_filename: str,
+) -> Path:
+    """Resolve explicit file output or directory-based default output path."""
+    if output is not None:
+        return Path(output).expanduser()
+    if output_dir is None:
+        raise ValueError("either --output or --output-dir is required")
+    return Path(output_dir).expanduser() / default_filename
+
+
+def git_commit_hash() -> str:
+    """Return the current git commit hash when available."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def route_inspector_version() -> str:
+    """Return installed package version when available."""
+    try:
+        return metadata.version("route-inspector")
+    except Exception:
+        return ""
+
+
+def cli_command_text(argv: list[str] | None = None) -> str:
+    """Return a shell-escaped command line for reproducibility metadata."""
+    argv = list(sys.argv if argv is None else argv)
+    return " ".join(shlex.quote(part) for part in argv)
+
+
+def write_manifest(
+    output_dir: Path,
+    *,
+    command_name: str,
+    input_files: Iterable[str | Path] = (),
+    output_files: Iterable[str | Path] | dict[str, str | Path] = (),
+    config_path: str | Path | None = None,
+    cli_args: Any | None = None,
+    argv: list[str] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> Path:
+    """Write a standard manifest sidecar for a command output directory."""
+    output_dir = Path(output_dir)
+    if isinstance(output_files, dict):
+        output_files_value = {
+            key: str(value) for key, value in sorted(output_files.items())
+        }
+    else:
+        output_files_value = [str(path) for path in output_files]
+    manifest = {
+        "command_name": command_name,
+        "full_cli_command": cli_command_text(argv),
+        "input_files": [str(path) for path in input_files],
+        "output_directory": str(output_dir),
+        "output_files": output_files_value,
+        "config_path": str(config_path) if config_path else None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "route_inspector_version": route_inspector_version(),
+        "git_commit_hash": git_commit_hash(),
+        "cli_args": json_safe(vars(cli_args)) if cli_args is not None else None,
+        **(extra or {}),
+    }
+    path = output_dir / "manifest.json"
+    write_json(path, manifest)
+    return path
+
+
+def write_errors_tsv(
+    path: Path,
+    errors: Iterable[dict[str, Any]],
+    *,
+    fieldnames: list[str] | None = None,
+) -> Path:
+    """Write generic tabular error sidecar, including an empty file header."""
+    rows = list(errors)
+    base_fields = fieldnames or ["route_id", "stage", "error_type", "message"]
+    extra_fields = sorted(
+        {
+            key
+            for row in rows
+            for key in row
+            if key not in base_fields
+        }
+    )
+    all_fields = base_fields + extra_fields
+    write_tsv(path, all_fields, rows)
+    return path
+
+
+def write_summary_sidecar(output_dir: Path, summary: dict[str, Any]) -> Path:
+    """Write generic summary.json sidecar beside command-specific summaries."""
+    path = Path(output_dir) / "summary.json"
+    write_json(path, summary)
+    return path
+
+
+def write_standard_sidecars(
+    output_dir: Path,
+    *,
+    command_name: str,
+    summary: dict[str, Any],
+    errors: Iterable[dict[str, Any]] = (),
+    input_files: Iterable[str | Path] = (),
+    output_files: Iterable[str | Path] | dict[str, str | Path] = (),
+    config_path: str | Path | None = None,
+    cli_args: Any | None = None,
+    argv: list[str] | None = None,
+    extra_manifest: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Write generic summary, errors, and manifest sidecars for a command."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = write_summary_sidecar(output_dir, summary)
+    errors_path = write_errors_tsv(output_dir / "errors.tsv", errors)
+    manifest_path = write_manifest(
+        output_dir,
+        command_name=command_name,
+        input_files=input_files,
+        output_files=output_files,
+        config_path=config_path,
+        cli_args=cli_args,
+        argv=argv,
+        extra=extra_manifest,
+    )
+    return {
+        "summary": str(summary_path),
+        "errors": str(errors_path),
+        "manifest": str(manifest_path),
+    }
+
+
 def resolve_file_or_dir_path(path: Path, default_filename: str) -> Path:
+    """Resolve output path information for resolve file or dir path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     if path.is_dir() or path.suffix == "":
         return path / default_filename
     return path
 
 
 def split_cell(value: str | None) -> list[str]:
+    """Split cell into normalized values.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     if not value:
         return []
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def reference_sort_key(value: Any) -> tuple[int, Any]:
+    """Return a deterministic sort key for route references.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     if isinstance(value, int):
         return (0, value)
     if isinstance(value, str) and value.isdigit():
@@ -131,6 +391,11 @@ def reference_sort_key(value: Any) -> tuple[int, Any]:
 
 
 def rule_column(fieldnames: list[str], preferred: tuple[str, ...]) -> str:
+    """Return rule column used for rule extraction or comparison.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     for candidate in preferred:
         if candidate in fieldnames:
             return candidate
@@ -145,6 +410,11 @@ def read_rule_from_tsv(
     *,
     columns: tuple[str, ...],
 ) -> str:
+    """Read a selected rule string from a TSV row.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     with path.open(encoding="utf-8") as file:
         reader = csv.DictReader(file, delimiter="\t")
         fieldnames = reader.fieldnames or []
@@ -162,10 +432,20 @@ def read_rule_from_tsv(
 
 
 def read_composite_rule_from_tsv(path: Path, row_index: int) -> str:
+    """Read a selected composite rule string from a TSV row.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     return read_rule_from_tsv(path, row_index, columns=("Composite_rule",))
 
 
 def read_alchemical_rule_from_tsv(path: Path, row_index: int) -> str:
+    """Read a selected alchemical rule string from a TSV row.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     return read_rule_from_tsv(
         path,
         row_index,
@@ -180,6 +460,11 @@ def write_composite_rules(
         dict[tuple[str, ...], dict[Any, set[str]]] | None
     ) = None,
 ) -> dict[str, Any]:
+    """Write composite rules to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     output_prefix = output.with_suffix("")
     output_suffix = output.suffix or ".tsv"
@@ -267,6 +552,11 @@ def write_composite_rules(
 
 
 def composite_summary_path_from_output(output: Path) -> Path:
+    """Build the composite summary path from an output prefix.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     prefix = output.with_suffix("")
     base_name = re.sub(r"(?:_t\d+)?_composite_rules$", "", prefix.name)
@@ -274,6 +564,11 @@ def composite_summary_path_from_output(output: Path) -> Path:
 
 
 def composite_routes_without_rules_path_from_output(output: Path) -> Path:
+    """Build the composite routes without rules path from an output prefix.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     prefix = output.with_suffix("")
     base_name = re.sub(r"(?:_t\d+)?_composite_rules$", "", prefix.name)
@@ -281,6 +576,11 @@ def composite_routes_without_rules_path_from_output(output: Path) -> Path:
 
 
 def write_composite_summary(output: Path, summary: dict[str, Any]) -> Path:
+    """Write composite summary to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     path = composite_summary_path_from_output(output)
     write_json(path, summary)
     return path
@@ -291,6 +591,11 @@ def write_composite_routes_without_rules(
     routes: dict[Any, dict[str, Any]],
     path: Path | None = None,
 ) -> Path:
+    """Write composite routes without rules to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     no_rules_path = path or composite_routes_without_rules_path_from_output(output)
     write_json(
         no_rules_path,
@@ -300,6 +605,11 @@ def write_composite_routes_without_rules(
 
 
 def write_composite_errors(output: Path, errors: list[dict[str, Any]]) -> None:
+    """Write composite errors to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     if not errors:
         return
     path = output.with_suffix(output.suffix + ".errors.tsv")
@@ -309,6 +619,11 @@ def write_composite_errors(output: Path, errors: list[dict[str, Any]]) -> None:
 
 
 def output_base(output: Path, suffix: str) -> Path:
+    """Build the normalized output stem shared by related artifacts.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
     prefix = output.with_suffix("")
     base_name = re.sub(r"_classified_alchemical_rules$", "", prefix.name)
     base_name = re.sub(r"_alchemical_rules$", "", base_name)
@@ -316,26 +631,51 @@ def output_base(output: Path, suffix: str) -> Path:
 
 
 def default_smi_path(output: Path) -> Path:
+    """Resolve output path information for default SMI path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     return output_base(output, "alchemical_reactions").with_suffix(".smi")
 
 
 def default_alchemical_summary_path(output: Path) -> Path:
+    """Resolve output path information for default alchemical summary path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     return output_base(output, "alchemical_rule_collection_summary").with_suffix(
         ".json"
     )
 
 
 def default_alchemical_error_path(output: Path) -> Path:
+    """Resolve output path information for default alchemical error path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     return output_base(output, "alchemical_rule_collection_errors").with_suffix(".tsv")
 
 
 def default_classification_output_path(alchemical_rules_tsv: Path) -> Path:
+    """Resolve output path information for default classification output path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     return output_base(alchemical_rules_tsv, "classified_alchemical_rules").with_suffix(
         ".tsv"
     )
 
 
 def default_classification_summary_path(output: Path) -> Path:
+    """Resolve output path information for default classification summary path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     return output_base(output, "alchemical_rule_classification_summary").with_suffix(
         ".json"
     )
@@ -346,6 +686,11 @@ def resolve_classification_output_paths(
     output: Path,
     summary: Path,
 ) -> tuple[Path, Path]:
+    """Resolve output path information for resolve classification output paths.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     base_name = re.sub(r"_alchemical_rules$", "", alchemical_rules_tsv.stem)
     output_path = resolve_file_or_dir_path(
         output,
@@ -359,10 +704,20 @@ def resolve_classification_output_paths(
 
 
 def is_directory_path(path: Path) -> bool:
+    """Resolve output path information for is directory path.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
     return path.is_dir() or path.suffix == ""
 
 
 def composite_output_stem(composite_rule_tsvs: Iterable[Path]) -> str:
+    """Infer the shared output stem from composite-rule TSV paths.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
     stems = []
     for path in composite_rule_tsvs:
         match = re.match(r"(.+)_t\d+_composite_rules$", path.stem)
@@ -382,6 +737,11 @@ def resolve_optional_sidecar_path(
     output_dir: Path,
     filename: str,
 ) -> Path:
+    """Resolve output path information for resolve optional sidecar path.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     if path is None:
         return output_dir / filename
     if is_directory_path(path):
@@ -397,6 +757,11 @@ def resolve_alchemical_output_paths(
     summary: Path | None = None,
     errors: Path | None = None,
 ) -> tuple[Path, Path, Path, Path]:
+    """Resolve output path information for resolve alchemical output paths.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     if is_directory_path(output):
         stem = composite_output_stem(composite_rule_tsvs)
         output_dir = output
@@ -429,7 +794,12 @@ def resolve_alchemical_output_paths(
 def iter_composite_rule_applications(
     tsv_paths: Iterable[Path],
 ) -> Iterable[CompositeRuleApplication]:
-    from route_analysis.composite_rules.unwrap import split_composite_rule
+    """Yield composite-rule applications from one or more TSV files.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
+    from route_inspector.composite_rules.unwrap import split_composite_rule
 
     for tsv_path in tsv_paths:
         with tsv_path.open(encoding="utf-8") as file:
@@ -459,6 +829,11 @@ def iter_composite_rule_applications(
 
 
 def expand_composite_rule_tsv_paths(paths: Iterable[Path]) -> list[Path]:
+    """Resolve output path information for expand composite rule TSV paths.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     expanded: list[Path] = []
     seen: set[Path] = set()
     for raw_path in paths:
@@ -476,6 +851,11 @@ def expand_composite_rule_tsv_paths(paths: Iterable[Path]) -> list[Path]:
 
 
 def sorted_aggregates(aggregates: dict[str, Any]) -> list[Any]:
+    """Return aggregate records sorted by popularity and rule text.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     return sorted(
         aggregates.values(),
         key=lambda aggregate: (
@@ -487,7 +867,11 @@ def sorted_aggregates(aggregates: dict[str, Any]) -> list[Any]:
 
 
 def reaction_output_reactants_num(rule_smarts: str) -> int:
-    """Return number of dot-separated molecules on the right side of a rule."""
+    """Return reaction output reactants num from a reaction or route node.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
 
     _left, separator, right = rule_smarts.partition(">>")
     if not separator:
@@ -496,7 +880,11 @@ def reaction_output_reactants_num(rule_smarts: str) -> int:
 
 
 def composite_output_reactants_num(sequence: Iterable[str]) -> int:
-    """Estimate final leaf count after applying a linear composite rule sequence."""
+    """Count output reactants for the last rule in a composite sequence.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
 
     total = 1
     seen_any = False
@@ -510,6 +898,11 @@ def write_alchemical_rules_tsv(
     output: Path,
     aggregates: dict[str, Any],
 ) -> dict[str, int]:
+    """Write alchemical rules TSV to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     fieldnames = [
         "Alchemical_rule",
         "output_reactants_num",
@@ -556,6 +949,11 @@ def write_pseudo_reactions_smi(
     pseudo_reactions: list[Any],
     aggregates: dict[str, Any],
 ) -> None:
+    """Write pseudo reactions SMI to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     alchemical_rule_ids = {
         aggregate.cgr_key: f"a{index}"
@@ -580,6 +978,11 @@ def write_pseudo_reactions_smi(
 
 
 def write_alchemical_errors(path: Path, errors: list[dict[str, Any]]) -> None:
+    """Write alchemical errors to disk.
+
+    Centralizing this logic keeps file naming, compressed input handling, and TSV/JSON
+    formatting consistent across extraction, scoring, and tutorials.
+    """
     if not errors:
         if path.exists():
             path.unlink()
@@ -600,11 +1003,21 @@ def write_alchemical_errors(path: Path, errors: list[dict[str, Any]]) -> None:
 
 
 def source_tsv_prefix(path: str | Path) -> str:
+    """Return the compact dataset and rule-size prefix for a source TSV.
+
+    Keeping this helper in the IO layer avoids duplicating low-level file and table
+    behavior in the chemistry-focused modules.
+    """
     stem = Path(path).stem
     return re.sub(r"_composite_rules$", "", stem)
 
 
 def alchemical_error_row_for_output(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize an alchemical extraction error row for TSV output.
+
+    The returned path follows the project naming conventions so downstream commands can
+    discover related summaries and error files automatically.
+    """
     return {
         "row_index": row.get("row_index", ""),
         "Target_smiles": row.get("Target_smiles")

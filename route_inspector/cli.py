@@ -4,25 +4,35 @@ import argparse
 import sys
 from pathlib import Path
 
-from route_analysis.alchemical_rules import alchemical, classify_alchemical
-from route_analysis.alchemical_rules import unwrap_alchemical
-from route_analysis.composite_rules import extract
-from route_analysis.composite_rules import unwrap as unwrap_composite
-from route_analysis.io import read_json, resolve_existing_path, setup_runtime_cache_dirs
-from route_analysis.protection.analysis import (
+from route_inspector.alchemical_rules import alchemical, classify_alchemical
+from route_inspector.alchemical_rules import unwrap_alchemical
+from route_inspector.composite_rules import extract
+from route_inspector.composite_rules import unwrap as unwrap_composite
+from route_inspector.io import (
+    read_json,
+    resolve_existing_path,
+    setup_runtime_cache_dirs,
+    write_standard_sidecars,
+)
+from route_inspector.protection.analysis import (
     ProtectionAnalysisConfig,
     analyze_protection_in_routes,
     load_composite_rule_index,
 )
-from route_analysis.protection.chython_rules import load_chython_protection_rules
-from route_analysis.protection.outputs import (
+from route_inspector.protection.chython_rules import load_chython_protection_rules
+from route_inspector.protection.outputs import (
     dataset_prefix_from_routes_path,
     write_protection_outputs,
 )
-from route_analysis.scoring import overlap
+from route_inspector.scoring import overlap
 
 
 def add_rule_extraction_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add rule extraction options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--environment-atom-count", type=int, default=1)
     parser.add_argument("--include-rings", action="store_true")
@@ -37,6 +47,11 @@ def add_rule_extraction_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_parallel_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add parallel options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument(
         "--n_cpu",
         "--n-cpu",
@@ -48,14 +63,28 @@ def add_parallel_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_composite_extraction_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add composite extraction options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument("--routes-json", type=Path, required=True)
     parser.add_argument(
         "--output",
         type=Path,
-        required=True,
+        default=None,
         help=(
             "Output prefix/path. Separate files are written as "
             "<prefix>_t<size>_composite_rules.tsv."
+        ),
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory where standard <dataset>_t<size> rule files and sidecars "
+            "are written. The dataset is inferred from --routes-json."
         ),
     )
     add_rule_extraction_arguments(parser)
@@ -115,6 +144,11 @@ def add_composite_extraction_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_alchemical_extraction_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add alchemical extraction options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument(
         "--composite-rule-tsv",
         type=Path,
@@ -125,12 +159,13 @@ def add_alchemical_extraction_arguments(parser: argparse.ArgumentParser) -> None
     parser.add_argument(
         "--output",
         type=Path,
-        required=True,
+        default=None,
         help=(
             "Output TSV file or output directory. When a directory is given, "
             "<prefix>_alchemical_rules.tsv and sidecar files are written there."
         ),
     )
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--output-smi", "--output_smi", type=Path, default=None)
     parser.add_argument("--summary", type=Path, default=None)
     parser.add_argument("--errors", type=Path, default=None)
@@ -143,14 +178,25 @@ def add_alchemical_extraction_arguments(parser: argparse.ArgumentParser) -> None
 
 
 def add_alchemical_classification_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add alchemical classification options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument("--alchemical-rules-tsv", type=Path, required=True)
     parser.add_argument("--default-rules-tsv", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--summary", type=Path, default=None)
     add_parallel_arguments(parser)
 
 
 def add_composite_unwrap_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add composite unwrap options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument("--smiles", required=True, help="Target molecule SMILES.")
     rule_source = parser.add_mutually_exclusive_group(required=True)
     rule_source.add_argument("--composite-rule", help="Composite rule string.")
@@ -168,6 +214,11 @@ def add_composite_unwrap_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_alchemical_unwrap_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add alchemical unwrap options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument("--smiles", required=True, help="Target molecule SMILES.")
     rule_source = parser.add_mutually_exclusive_group(required=True)
     rule_source.add_argument("--alchemical-rule", help="Alchemical rule SMARTS.")
@@ -185,6 +236,11 @@ def add_alchemical_unwrap_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_scoring_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add scoring options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument(
         "--extracted-tsv",
         "--composite-rule-tsv",
@@ -213,7 +269,8 @@ def add_scoring_arguments(parser: argparse.ArgumentParser) -> None:
             "neg_overlap."
         ),
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
     add_rule_extraction_arguments(parser)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--min-length", type=int, default=2)
@@ -224,6 +281,11 @@ def add_scoring_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_protection_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add protection options to an argparse parser.
+
+    The parser mutation is kept in one place so terminal commands, tests, and notebook
+    examples expose the same options and defaults.
+    """
     parser.add_argument("--routes-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
@@ -255,7 +317,47 @@ def add_protection_arguments(parser: argparse.ArgumentParser) -> None:
     add_parallel_arguments(parser)
 
 
+def add_preprocess_routes_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add PaRoutes preprocessing options to an argparse parser."""
+    parser.add_argument("--input-dir", type=Path, default=Path("data/raw"))
+    parser.add_argument("--output-dir", type=Path, default=Path("data/clean"))
+    parser.add_argument(
+        "--summary-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional output root for generated preprocessing reports. When set, "
+            "files are written under <summary-dir>/<dataset>/00_preprocess/."
+        ),
+    )
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["n1_routes.json", "n5_routes.json"],
+        help=(
+            "Dataset filenames to preprocess. Missing underscore names are resolved "
+            "against the PaRoutes hyphenated filenames when needed."
+        ),
+    )
+    add_rule_extraction_arguments(parser)
+    parser.add_argument("--protection-config", type=Path, default=None)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--ignore-errors", action="store_true")
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=100,
+        help="Print route-level progress every N processed routes. Use 0 to disable.",
+    )
+    add_parallel_arguments(parser)
+
+
 def read_protection_route_ids(path: Path | None) -> set[str] | None:
+    """Read route IDs selected for protection analysis from a text file.
+
+    The function translates CLI arguments into the typed inputs expected by the
+    underlying analysis module.
+    """
     if path is None:
         return None
     route_ids = set()
@@ -268,6 +370,11 @@ def read_protection_route_ids(path: Path | None) -> set[str] | None:
 
 
 def run_protection_analysis(args: argparse.Namespace) -> int:
+    """Run protection analysis using configured inputs.
+
+    The function translates CLI arguments into the typed inputs expected by the
+    underlying analysis module.
+    """
     setup_runtime_cache_dirs()
     routes_path = resolve_existing_path(args.routes_json)
     config_path = resolve_existing_path(args.config) if args.config else None
@@ -315,6 +422,22 @@ def run_protection_analysis(args: argparse.Namespace) -> int:
         args.output_dir,
         dataset_prefix=dataset_prefix_from_routes_path(routes_path),
     )
+    protection_summary = dict(result.summary)
+    protection_summary["output_files"] = output_info["output_files"]
+    write_standard_sidecars(
+        args.output_dir,
+        command_name="analyze-protection",
+        summary=protection_summary,
+        errors=result.summary.get("errors", []),
+        input_files=[
+            routes_path,
+            *(args.composite_rule_tsv or []),
+            *(args.alchemical_rules_tsv or []),
+        ],
+        output_files=output_info["output_files"],
+        config_path=config_path,
+        cli_args=args,
+    )
     print(
         "[analyze-protection] done: "
         f"{result.summary['n_routes']} routes, "
@@ -330,7 +453,19 @@ def run_protection_analysis(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_preprocess_routes(args: argparse.Namespace) -> int:
+    """Run PaRoutes preprocessing using configured inputs."""
+    from route_inspector import preprocess_routes
+
+    return preprocess_routes.run(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
+    """Build parser from normalized inputs.
+
+    The returned parser wires every route-inspector subcommand to its implementation
+    without importing heavy chemistry modules during help output.
+    """
     parser = argparse.ArgumentParser(prog="route-inspector")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -390,15 +525,32 @@ def build_parser() -> argparse.ArgumentParser:
     add_protection_arguments(protection_parser)
     protection_parser.set_defaults(func=run_protection_analysis)
 
+    preprocess_parser = subparsers.add_parser(
+        "preprocess-routes",
+        help="Normalize PaRoutes datasets and split protection-related multicenter reactions.",
+    )
+    add_preprocess_routes_arguments(preprocess_parser)
+    preprocess_parser.set_defaults(func=run_preprocess_routes)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch the route-inspector CLI to the selected subcommand.
+
+    This is the package entry point used by `python -m route_inspector.cli` and by the
+    installed console script.
+    """
     args = build_parser().parse_args(argv)
     return args.func(args)
 
 
 def extract_composite_rules(argv: list[str] | None = None) -> int:
+    """Extract composite rules from mapped route data.
+
+    This wrapper lets notebooks and external Python code invoke the same subcommand
+    implementation without re-creating argparse setup manually.
+    """
     parser = argparse.ArgumentParser(
         description="Extract SynPlanner/chython composite rules from route trees."
     )
@@ -407,6 +559,11 @@ def extract_composite_rules(argv: list[str] | None = None) -> int:
 
 
 def extract_alchemical_rules(argv: list[str] | None = None) -> int:
+    """Extract alchemical rules from mapped route data.
+
+    This wrapper lets notebooks and external Python code invoke the same subcommand
+    implementation without re-creating argparse setup manually.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Collapse composite-rule unwrappings into pseudo-reactions and "
@@ -418,6 +575,11 @@ def extract_alchemical_rules(argv: list[str] | None = None) -> int:
 
 
 def classify_alchemical_rules(argv: list[str] | None = None) -> int:
+    """Classify alchemical rules against reference rules.
+
+    This wrapper lets notebooks and external Python code invoke the same subcommand
+    implementation without re-creating argparse setup manually.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Classify alchemical rules as negative if their QueryCGR matches a "
@@ -429,6 +591,11 @@ def classify_alchemical_rules(argv: list[str] | None = None) -> int:
 
 
 def score_composite_overlap(argv: list[str] | None = None) -> int:
+    """Score composite overlap against reference routes.
+
+    This wrapper lets notebooks and external Python code invoke the same subcommand
+    implementation without re-creating argparse setup manually.
+    """
     parser = argparse.ArgumentParser(
         description="Score extracted composite rules against reference route JSON."
     )
@@ -437,6 +604,11 @@ def score_composite_overlap(argv: list[str] | None = None) -> int:
 
 
 def unwrap_composite_rule(argv: list[str] | None = None) -> int:
+    """Unwrap composite rule into a retrosynthetic route.
+
+    This wrapper lets notebooks and external Python code invoke the same subcommand
+    implementation without re-creating argparse setup manually.
+    """
     parser = argparse.ArgumentParser(
         description="Sequentially apply a composite rule to unwrap a target molecule."
     )
@@ -445,6 +617,11 @@ def unwrap_composite_rule(argv: list[str] | None = None) -> int:
 
 
 def unwrap_alchemical_rule(argv: list[str] | None = None) -> int:
+    """Unwrap alchemical rule into a retrosynthetic route.
+
+    This wrapper lets notebooks and external Python code invoke the same subcommand
+    implementation without re-creating argparse setup manually.
+    """
     parser = argparse.ArgumentParser(
         description="Apply one alchemical rule to a target molecule."
     )
@@ -453,11 +630,28 @@ def unwrap_alchemical_rule(argv: list[str] | None = None) -> int:
 
 
 def analyze_protection(argv: list[str] | None = None) -> int:
+    """Run protection analysis from the CLI wrapper.
+
+    This wrapper lets notebooks and external Python code invoke the same subcommand
+    implementation without re-creating argparse setup manually.
+    """
     parser = argparse.ArgumentParser(
         description="Analyze route-level protection/deprotection strategies."
     )
     add_protection_arguments(parser)
     return run_protection_analysis(parser.parse_args(argv))
+
+
+def preprocess_routes(argv: list[str] | None = None) -> int:
+    """Preprocess PaRoutes datasets from the CLI wrapper."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Normalize PaRoutes trees and split protection-related multicenter "
+            "reactions."
+        )
+    )
+    add_preprocess_routes_arguments(parser)
+    return run_preprocess_routes(parser.parse_args(argv))
 
 
 if __name__ == "__main__":
