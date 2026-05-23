@@ -23,17 +23,32 @@ class ProtectionRule:
 
 
 def _product_smarts_from_atoms_to_keep(atoms_to_keep: tuple[int, ...]) -> str:
+    """Build product SMARTS from the mapped atoms retained after cleavage.
+
+    The local adapter hides differences between chython installations and exposes one
+    normalized `ProtectionRule` dictionary to the analysis code.
+    """
     if not atoms_to_keep:
         return ""
     return ".".join(f"[A:{atom_number}]" for atom_number in atoms_to_keep)
 
 
 def _mapped_atoms_from_product_smarts(product_smarts: str) -> tuple[int, ...]:
+    """Extract mapped atom numbers from product SMARTS.
+
+    The local adapter hides differences between chython installations and exposes one
+    normalized `ProtectionRule` dictionary to the analysis code.
+    """
     atoms = tuple(int(value) for value in re.findall(r":(\d+)\]", product_smarts))
     return atoms
 
 
 def _adapt_protective_rules(rules: Any, *, source: str) -> dict[str, ProtectionRule]:
+    """Convert raw chython protective rules into normalized ProtectionRule objects.
+
+    The local adapter hides differences between chython installations and exposes one
+    normalized `ProtectionRule` dictionary to the analysis code.
+    """
     from chython import smarts
 
     out: dict[str, ProtectionRule] = {}
@@ -59,12 +74,22 @@ def _adapt_protective_rules(rules: Any, *, source: str) -> dict[str, ProtectionR
 
 
 def _load_from_algorithms_groups() -> dict[str, ProtectionRule]:
+    """Load from algorithms groups from configured sources.
+
+    The local adapter hides differences between chython installations and exposes one
+    normalized `ProtectionRule` dictionary to the analysis code.
+    """
     from chython.algorithms.groups._protective import rules
 
     return _adapt_protective_rules(rules, source="chython.algorithms.groups._protective")
 
 
 def _load_from_reactor_deprotection() -> dict[str, ProtectionRule]:
+    """Load from reactor deprotection from configured sources.
+
+    The local adapter hides differences between chython installations and exposes one
+    normalized `ProtectionRule` dictionary to the analysis code.
+    """
     from chython import smarts
     from chython.reactor import deprotection
 
@@ -100,18 +125,23 @@ def _load_from_reactor_deprotection() -> dict[str, ProtectionRule]:
 
 
 def _load_from_local_protective() -> dict[str, ProtectionRule]:
-    from route_analysis.protection import chython_protective as module
+    """Load from local protective from configured sources.
+
+    The local adapter hides differences between chython installations and exposes one
+    normalized `ProtectionRule` dictionary to the analysis code.
+    """
+    from route_inspector.protection import chython_protective as module
 
     return _adapt_protective_rules(
         module.rules,
-        source="route_analysis.protection.chython_protective",
+        source="route_inspector.protection.chython_protective",
     )
 
 
 def load_chython_protection_rules() -> dict[str, ProtectionRule]:
     """Load the curated protecting-group rules available in this environment.
 
-    The project-local ``route_analysis.protection.chython_protective`` copy is tried
+    The project-local ``route_inspector.protection.chython_protective`` copy is tried
     first to avoid environment-version differences in chython. Newer chython
     builds can also expose ``chython.algorithms.groups._protective.rules``;
     older SynPlanner environments expose similar definitions through

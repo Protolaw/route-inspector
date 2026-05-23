@@ -4,8 +4,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from route_analysis.io import write_json, write_tsv
-from route_analysis.protection.analysis import ProtectionAnalysisResult
+from route_inspector.io import write_json, write_tsv
+from route_inspector.protection.analysis import ProtectionAnalysisResult
 
 
 ROUTE_STATS_FIELDS = [
@@ -88,6 +88,22 @@ INTERVAL_RULE_FIELDS = [
     "last_reaction_before_deprotection",
 ]
 
+SINGLE_RULE_FIELDS = [
+    "source_pg_type",
+    "rule",
+    "route_count",
+    "rule_count",
+    "route_ids",
+]
+
+AGG_SINGLE_RULE_FIELDS = [
+    "rule",
+    "pg_types",
+    "route_count",
+    "rulec_count",
+    "route_ids",
+]
+
 GROUP_SUMMARY_FIELDS = [
     "pg_type",
     "popularity",
@@ -132,17 +148,6 @@ RULE_FAMILY_FIELDS = [
     "interpretation_label",
 ]
 
-NETWORK_EDGE_FIELDS = [
-    "source_pg_type",
-    "target_rule_family_id",
-    "edge_weight",
-    "route_count",
-    "target_count",
-    "median_lifetime_steps",
-    "representative_rule",
-    "interpretation_label",
-]
-
 TRACE_FAILURE_FIELDS = [
     "event_id",
     "route_id",
@@ -159,8 +164,12 @@ TRACE_FAILURE_FIELDS = [
     "debug_message",
 ]
 
-
 def dataset_prefix_from_routes_path(routes_json: Path) -> str:
+    """Infer the dataset prefix from a routes JSON path.
+
+    Output formatting is kept separate from route tracing so protection analysis can
+    write stable TSV and JSON artifacts from the same in-memory results.
+    """
     stem = routes_json.stem
     stem = re.sub(r"[-_]?routes$", "", stem)
     return stem or "routes"
@@ -172,6 +181,11 @@ def write_protection_outputs(
     *,
     dataset_prefix: str,
 ) -> dict[str, Any]:
+    """Write protection outputs to disk.
+
+    Output formatting is kept separate from route tracing so protection analysis can
+    write stable TSV and JSON artifacts from the same in-memory results.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = output_dir / dataset_prefix
     paths = {
@@ -182,26 +196,46 @@ def write_protection_outputs(
         "interval_rules": prefix.with_name(
             f"{prefix.name}_protection_interval_rules.tsv"
         ),
+        "single_rules": prefix.with_name(
+            f"{prefix.name}_protection_single_rules.tsv"
+        ),
+        "agg_single_rule": prefix.with_name(
+            f"{prefix.name}_protection_agg_single_rule.tsv"
+        ),
         "group_summary": prefix.with_name(
             f"{prefix.name}_protection_group_summary.tsv"
         ),
         "rule_families": prefix.with_name(
             f"{prefix.name}_protection_rule_families.tsv"
         ),
-        "network_edges": prefix.with_name(
-            f"{prefix.name}_protection_network_edges.tsv"
-        ),
         "trace_failures": prefix.with_name(
             f"{prefix.name}_protection_trace_failures.tsv"
         ),
         "summary": prefix.with_name(f"{prefix.name}_protection_summary.json"),
     }
+    for stale_path in (
+        prefix.with_name(f"{prefix.name}_protection_network_edges.tsv"),
+        prefix.with_name(f"{prefix.name}_protection_free_routes.tsv"),
+    ):
+        if stale_path.exists():
+            stale_path.unlink()
+
     write_tsv(paths["route_stats"], ROUTE_STATS_FIELDS, result.route_stats_rows)
     write_tsv(paths["events"], EVENT_FIELDS, result.event_rows)
     write_tsv(
         paths["interval_rules"],
         INTERVAL_RULE_FIELDS,
         result.interval_rule_rows,
+    )
+    write_tsv(
+        paths["single_rules"],
+        SINGLE_RULE_FIELDS,
+        result.single_rule_rows,
+    )
+    write_tsv(
+        paths["agg_single_rule"],
+        AGG_SINGLE_RULE_FIELDS,
+        result.aggregate_single_rule_rows,
     )
     write_tsv(
         paths["group_summary"],
@@ -212,11 +246,6 @@ def write_protection_outputs(
         paths["rule_families"],
         RULE_FAMILY_FIELDS,
         result.rule_family_rows,
-    )
-    write_tsv(
-        paths["network_edges"],
-        NETWORK_EDGE_FIELDS,
-        result.network_edge_rows,
     )
     write_tsv(
         paths["trace_failures"],

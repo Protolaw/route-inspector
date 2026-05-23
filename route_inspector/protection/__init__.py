@@ -1,12 +1,12 @@
 """Route-level protection/deprotection strategy analysis."""
 
-from route_analysis.protection.analysis import (
+from route_inspector.protection.analysis import (
     ProtectionAnalysisConfig,
     ProtectionAnalysisResult,
     analyze_protection_in_routes,
     analyze_route_protection,
 )
-from route_analysis.protection.chython_rules import (
+from route_inspector.protection.chython_rules import (
     ProtectionRule,
     load_chython_protection_rules,
 )

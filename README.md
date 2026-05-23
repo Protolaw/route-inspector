@@ -26,8 +26,6 @@ Inspector asks route-level questions:
 
 - Which **contiguous reaction-center-sharing rule sequences** repeat across a
   route collection?
-- Which multi-step rules can be unwrapped back into **route JSON/SVG** so a
-  chemist can inspect them visually?
 - Which composite-rule applications collapse into **alchemical pseudo-reactions**?
 - Which discovered route fragments overlap a reference route vocabulary?
 - Where are **protecting groups** introduced, inherited from stock, or removed?
@@ -59,7 +57,7 @@ route-inspector --help
 For development without installation, run the module directly:
 
 ```bash
-python -m route_analysis.cli --help
+python -m route_inspector.cli --help
 ```
 
 ## Quick start
@@ -68,8 +66,8 @@ Extract composite rules from a PaRoutes-style route JSON:
 
 ```bash
 route-inspector extract-composite-rules \
-  --routes-json data/n1-routes.json \
-  --output comp_output/n1/n1.tsv \
+  --routes-json data/clean/n1_routes.json \
+  --output-dir outputs/n1/10_composite_rules \
   --config configs/rule_extraction_functional_groups.yaml \
   --ignore-errors
 ```
@@ -99,6 +97,79 @@ route-inspector unwrap-composite-rule \
 | Route unwrapping | `unwrap-composite-rule`, `unwrap-alchemical-rule` | route JSON and SVG depictions |
 | Reference overlap scoring | `score-composite-overlap` | unique-rule, coverage, Jaccard, and popularity-weighted overlap scores |
 | Protection analysis | `analyze-protection` | event tables, rule-family summaries, trace failures, network edges, summary JSON |
+
+## Output organization
+
+Keep canonical datasets under `data/` and generated command artifacts under
+dataset-first stage directories:
+
+```text
+data/
+  raw/
+  clean/
+outputs/
+  n1/
+    00_preprocess/
+    10_composite_rules/
+    20_alchemical_rules/
+    30_alchemical_classification/
+    40_scoring/
+    50_protection_analysis/
+```
+
+Commands still accept explicit `--output` paths where they did before. Prefer
+`--output-dir` for normal pipeline runs; standard filenames are inferred from the
+dataset prefix, for example `n1_t2_composite_rules.tsv` and
+`n1_alchemical_rules.tsv`. Stage directories also get generic `summary.json`,
+`errors.tsv`, and `manifest.json` sidecars when possible.
+
+Complete `n1` pipeline example:
+
+```bash
+python -m route_inspector.cli preprocess-routes \
+  --input-dir data/raw \
+  --output-dir data/clean \
+  --datasets n1_routes.json \
+  --summary-dir outputs \
+  --config configs/rule_extraction_small.yaml \
+  --ignore-errors
+
+python -m route_inspector.cli extract-composite-rules \
+  --routes-json data/clean/n1_routes.json \
+  --output-dir outputs/n1/10_composite_rules \
+  --config configs/rule_extraction_functional_groups.yaml \
+  --ignore-errors
+
+python -m route_inspector.cli extract-alchemical-rules \
+  --composite-rule-tsv outputs/n1/10_composite_rules \
+  --output-dir outputs/n1/20_alchemical_rules \
+  --config configs/rule_extraction_functional_groups.yaml \
+  --ignore-errors
+
+python -m route_inspector.cli classify-alchemical-rules \
+  --alchemical-rules-tsv outputs/n1/20_alchemical_rules/n1_alchemical_rules.tsv \
+  --default-rules-tsv reference/pop_3_rules.tsv \
+  --output-dir outputs/n1/30_alchemical_classification
+
+python -m route_inspector.cli score-composite-overlap \
+  --extracted-tsv outputs/n1/10_composite_rules \
+  --reference-routes-json data/clean/n1_routes.json \
+  --classification-tsv outputs/n1/30_alchemical_classification \
+  --output-dir outputs/n1/40_scoring \
+  --config configs/rule_extraction_functional_groups.yaml \
+  --ignore-errors
+
+python -m route_inspector.cli analyze-protection \
+  --routes-json data/clean/n1_routes.json \
+  --composite-rule-tsv outputs/n1/10_composite_rules \
+  --alchemical-rules-tsv outputs/n1/20_alchemical_rules/n1_alchemical_rules.tsv \
+  --output-dir outputs/n1/50_protection_analysis \
+  --config configs/protection_analysis.yaml \
+  --include-multicenter \
+  --deprotection-first \
+  --querycgr-compare \
+  --ignore-errors
+```
 
 ## Documentation
 

@@ -13,12 +13,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-from route_analysis.alchemical_rules.alchemical import (
+from route_inspector.alchemical_rules.alchemical import (
     query_cgr_coarse_signature,
     query_cgr_isomorphic,
     rule_query_cgr,
 )
-from route_analysis.composite_rules.extract import (
+from route_inspector.composite_rules.extract import (
     ReactionRuleStep,
     SynPlannerRuleExtractor,
     normalize_route_tree,
@@ -27,15 +27,15 @@ from route_analysis.composite_rules.extract import (
     route_target_smiles,
     valid_composite_sequence_occurrences,
 )
-from route_analysis.composite_rules.unwrap import split_composite_rule
-from route_analysis.io import (
+from route_inspector.composite_rules.unwrap import split_composite_rule
+from route_inspector.io import (
     expand_composite_rule_tsv_paths,
     normalize_n_cpu,
     read_tsv_rows,
     reference_sort_key,
     split_cell,
 )
-from route_analysis.protection.chython_rules import ProtectionRule
+from route_inspector.protection.chython_rules import ProtectionRule
 
 
 _PROTECTION_WORKER_CONFIG: ProtectionAnalysisConfig | None = None
@@ -62,6 +62,11 @@ class ProtectionAnalysisConfig:
 
     @classmethod
     def from_yaml(cls, path: Path | None) -> "ProtectionAnalysisConfig":
+        """Load protection-analysis configuration from a YAML file.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         if path is None:
             return cls()
         import yaml
@@ -91,6 +96,11 @@ class ProtectionAnalysisConfig:
         )
 
     def with_cli_overrides(self, args: argparse.Namespace) -> "ProtectionAnalysisConfig":
+        """Return a config copy with CLI override values applied.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         if getattr(args, "min_composite_size", None) is not None:
             self.min_composite_size = args.min_composite_size
         if getattr(args, "max_composite_size", None) is not None:
@@ -250,6 +260,26 @@ class IntervalRuleObservation:
     last_reaction_before_deprotection: str = ""
 
 
+@dataclass(frozen=True)
+class ProtectionSingleRuleObservation:
+    route_id: str
+    pg_type: str
+    rule_smarts: str
+    reaction_smiles: str
+    event_id: str
+
+
+@dataclass
+class ProtectionSingleRuleAggregate:
+    representative_rule: str
+    query_cgr: Any
+    rule_count: int = 0
+    pg_types: set[str] = field(default_factory=set)
+    route_ids: set[str] = field(default_factory=set)
+    event_ids: set[str] = field(default_factory=set)
+    reaction_smiles: set[str] = field(default_factory=set)
+
+
 @dataclass
 class CompositeRuleFamily:
     family_id: str
@@ -267,9 +297,10 @@ class ProtectionAnalysisResult:
     route_stats_rows: list[dict[str, Any]]
     event_rows: list[dict[str, Any]]
     interval_rule_rows: list[dict[str, Any]]
+    single_rule_rows: list[dict[str, Any]]
+    aggregate_single_rule_rows: list[dict[str, Any]]
     group_summary_rows: list[dict[str, Any]]
     rule_family_rows: list[dict[str, Any]]
-    network_edge_rows: list[dict[str, Any]]
     trace_failure_rows: list[dict[str, Any]]
     summary: dict[str, Any]
     debug_routes: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -277,6 +308,11 @@ class ProtectionAnalysisResult:
 
 @lru_cache(maxsize=16384)
 def parse_molecule(smiles_text: str) -> Any:
+    """Parse molecule into chython/SynPlanner objects.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     from chython import smiles
 
     return smiles(smiles_text)
@@ -284,18 +320,33 @@ def parse_molecule(smiles_text: str) -> Any:
 
 @lru_cache(maxsize=8192)
 def parse_reaction(reaction_smiles: str) -> Any:
+    """Parse reaction into chython/SynPlanner objects.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     from chython import smiles
 
     return smiles(reaction_smiles)
 
 
 def canonical_molecule_string(molecule: Any) -> str:
+    """Return a canonical string representation for molecule comparison.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     molecule_copy = molecule.copy()
     molecule_copy.canonicalize()
     return str(molecule_copy)
 
 
 def same_molecule(left: Any, right: Any) -> bool:
+    """Return whether two inputs represent the same molecule.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     if left.atoms_count != right.atoms_count or left.bonds_count != right.bonds_count:
         return False
     left_copy = left.copy()
@@ -318,6 +369,11 @@ def same_molecule(left: Any, right: Any) -> bool:
 
 
 def molecule_node_mapped_smiles(node: dict[str, Any]) -> str:
+    """Return molecule node mapped SMILES from a molecule or molecule node.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     metadata = node.get("metadata") or {}
     return (
         node.get("mapped_smiles")
@@ -328,15 +384,30 @@ def molecule_node_mapped_smiles(node: dict[str, Any]) -> str:
 
 
 def molecule_node_smiles(node: dict[str, Any]) -> str:
+    """Return molecule node SMILES from a molecule or molecule node.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     metadata = node.get("metadata") or {}
     return node.get("smiles") or metadata.get("smiles") or ""
 
 
 def is_stock_molecule(node: dict[str, Any]) -> bool:
+    """Return whether stock molecule matches the expected condition.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     return bool(node.get("in_stock") or (node.get("metadata") or {}).get("in_stock"))
 
 
 def reaction_atom_ids(reaction: Any) -> set[int]:
+    """Return reaction atom IDs from a reaction or route node.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     atom_ids: set[int] = set()
     for molecule in reaction.reactants + reaction.products + reaction.reagents:
         atom_ids.update(int(atom_id) for atom_id in molecule)
@@ -344,6 +415,11 @@ def reaction_atom_ids(reaction: Any) -> set[int]:
 
 
 def remap_molecule(molecule: Any, mapping: dict[int, int]) -> Any:
+    """Remap molecule with globally consistent atom IDs.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     molecule_copy = molecule.copy()
     molecule_mapping = {
         atom_id: mapping[atom_id]
@@ -356,6 +432,11 @@ def remap_molecule(molecule: Any, mapping: dict[int, int]) -> Any:
 
 
 def remap_reaction(reaction: Any, mapping: dict[int, int]) -> Any:
+    """Remap reaction with globally consistent atom IDs.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     from chython.containers import ReactionContainer
 
     return ReactionContainer(
@@ -374,6 +455,11 @@ def find_matching_molecule(
     fallback_smiles: str = "",
     excluded_indexes: set[int] | None = None,
 ) -> tuple[int, Any] | tuple[None, None]:
+    """Find matching molecule if a valid match exists.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     excluded = excluded_indexes or set()
     reference_molecule = reference
     if reference_molecule is None and fallback_smiles:
@@ -396,14 +482,29 @@ def find_matching_molecule(
 
 
 def format_mapped_molecule(molecule: Any) -> str:
+    """Format mapped molecule for serialized output.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     return format(molecule, "m")
 
 
 def format_mapped_reaction(reaction: Any) -> str:
+    """Format mapped reaction for serialized output.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     return format(reaction, "m")
 
 
 def set_node_mapped_smiles(node: dict[str, Any], molecule: Any) -> None:
+    """Set node mapped SMILES on a route-tree node.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     metadata = node.setdefault("metadata", {})
     metadata["mapped_smiles"] = format_mapped_molecule(molecule)
 
@@ -423,6 +524,11 @@ def normalize_route_tree_global_atom_maps(route: dict[str, Any]) -> dict[str, An
     all_original_atom_ids: set[int] = set()
 
     def collect_original_atom_ids(node: dict[str, Any]) -> None:
+        """Collect original atom IDs from route-analysis input data.
+
+        It relies on globally consistent atom maps so protected atom IDs remain
+        meaningful while tracing protection and deprotection events.
+        """
         if node.get("type") == "reaction":
             try:
                 all_original_atom_ids.update(reaction_atom_ids(parse_reaction(node["smiles"])))
@@ -437,6 +543,11 @@ def normalize_route_tree_global_atom_maps(route: dict[str, Any]) -> dict[str, An
     next_atom_id = max(all_original_atom_ids or {0}) + 1
 
     def fresh_atom_id() -> int:
+        """Return the next unused atom-map number for a normalized route branch.
+
+        It relies on globally consistent atom maps so protected atom IDs remain
+        meaningful while tracing protection and deprotection events.
+        """
         nonlocal next_atom_id
         while next_atom_id in used_atom_ids:
             next_atom_id += 1
@@ -446,6 +557,11 @@ def normalize_route_tree_global_atom_maps(route: dict[str, Any]) -> dict[str, An
         return atom_id
 
     def complete_mapping(reaction: Any, alignment: dict[int, int]) -> dict[int, int]:
+        """Complete an atom-map alignment with fresh IDs for newly introduced atoms.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         mapping: dict[int, int] = dict(alignment)
         for target_atom_id in alignment.values():
             used_atom_ids.add(int(target_atom_id))
@@ -461,6 +577,11 @@ def normalize_route_tree_global_atom_maps(route: dict[str, Any]) -> dict[str, An
         return mapping
 
     def visit_molecule(node: dict[str, Any], expected_molecule: Any | None = None) -> None:
+        """Visit one molecule during recursive route traversal.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         if expected_molecule is not None:
             set_node_mapped_smiles(node, expected_molecule)
 
@@ -516,6 +637,11 @@ def normalize_route_tree_global_atom_maps(route: dict[str, Any]) -> dict[str, An
         reaction_node: dict[str, Any],
         reaction: Any | None = None,
     ) -> None:
+        """Visit one reaction children during recursive route traversal.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         if reaction is None:
             try:
                 reaction = parse_reaction(reaction_smiles_from_node(reaction_node))
@@ -545,6 +671,11 @@ def normalize_route_tree_global_atom_maps(route: dict[str, Any]) -> dict[str, An
 
 
 def build_route_index(route: dict[str, Any]) -> RouteIndex:
+    """Build route index from normalized inputs.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     route = normalize_route_tree(route)
     mol_counter = 0
     rxn_counter = 0
@@ -556,12 +687,22 @@ def build_route_index(route: dict[str, Any]) -> RouteIndex:
     child_mols_by_reaction: dict[str, tuple[str, ...]] = {}
 
     def next_mol_id() -> str:
+        """Return the next synthetic molecule-node ID for the route index.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         nonlocal mol_counter
         node_id = f"m{mol_counter}"
         mol_counter += 1
         return node_id
 
     def next_rxn_id() -> str:
+        """Return the next synthetic reaction-node ID for the route index.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         nonlocal rxn_counter
         node_id = f"r{rxn_counter}"
         rxn_counter += 1
@@ -573,6 +714,11 @@ def build_route_index(route: dict[str, Any]) -> RouteIndex:
         depth: int,
         parent_reaction_id: str | None,
     ) -> str:
+        """Visit one molecule during recursive route traversal.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         mol_id = str(node.get("node_id") or node.get("id") or next_mol_id())
         molecule_records[mol_id] = MoleculeRecord(
             node_id=mol_id,
@@ -606,6 +752,11 @@ def build_route_index(route: dict[str, Any]) -> RouteIndex:
         depth: int,
         parent_mol_id: str,
     ) -> list[str]:
+        """Visit one reaction during recursive route traversal.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
         child_mol_ids: list[str] = []
         for child in node.get("children", []) or []:
             if isinstance(child, dict) and child.get("type") == "mol":
@@ -641,6 +792,11 @@ def build_route_index(route: dict[str, Any]) -> RouteIndex:
 
 
 def reaction_center_atoms(reaction_smiles: str) -> frozenset[int]:
+    """Return reaction center atoms from a reaction or route node.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     try:
         from synplan.chem.data.standardizing import RemoveReagentsStandardizer
 
@@ -656,6 +812,11 @@ def has_protected_pattern_for_atoms(
     rule: ProtectionRule,
     protected_atom_ids: Iterable[int],
 ) -> bool:
+    """Return whether the input contains protected pattern for atoms.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     protected_atom_set = set(protected_atom_ids)
     for mapping in rule.query.get_mapping(molecule):
         kept_atoms = {
@@ -669,6 +830,11 @@ def has_protected_pattern_for_atoms(
 
 
 def has_protected_pattern(molecule: Any, rule: ProtectionRule) -> bool:
+    """Return whether the input contains protected pattern.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     return bool(matching_sites(molecule, rule))
 
 
@@ -676,6 +842,11 @@ def molecule_node_has_protected_pattern(
     molecule_record: MoleculeRecord,
     rule: ProtectionRule,
 ) -> bool:
+    """Return molecule node has protected pattern from a molecule or molecule node.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     molecule_smiles = molecule_record.mapped_smiles or molecule_record.smiles
     if not molecule_smiles:
         return False
@@ -690,6 +861,11 @@ def molecule_record_has_protected_atoms(
     rule: ProtectionRule,
     protected_atom_ids: Iterable[int],
 ) -> bool:
+    """Return molecule record has protected atoms from a molecule or molecule node.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     molecule_smiles = molecule_record.mapped_smiles or molecule_record.smiles
     if not molecule_smiles:
         return False
@@ -707,6 +883,11 @@ def matching_site_mappings(
     molecule: Any,
     rule: ProtectionRule,
 ) -> list[tuple[tuple[int, ...], dict[int, int]]]:
+    """Return atom mappings for protection-rule matches in a molecule.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     sites: list[tuple[tuple[int, ...], dict[int, int]]] = []
     for mapping in rule.query.get_mapping(molecule):
         atoms = tuple(
@@ -728,10 +909,20 @@ def matching_site_mappings(
 
 
 def matching_sites(molecule: Any, rule: ProtectionRule) -> list[tuple[int, ...]]:
+    """Return matched protecting-group atom sets in a molecule.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     return [atoms for atoms, _mapping in matching_site_mappings(molecule, rule)]
 
 
 def oxygen_attached_to_carbonyl_carbon(molecule: Any, atom_id: int) -> bool:
+    """Return whether an oxygen atom is bonded to a carbonyl carbon.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     if atom_id not in set(molecule):
         return False
     atom = molecule.atom(atom_id)
@@ -759,16 +950,31 @@ def skip_rule_match(
     reactant: Any,
     protected_atom_ids: tuple[int, ...],
 ) -> bool:
+    """Return whether a protection-rule match should be ignored.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     if rule.name == "hydroxyl_methyl" and protected_atom_ids:
         return oxygen_attached_to_carbonyl_carbon(reactant, protected_atom_ids[0])
     return False
 
 
 def carboxyl_deprotection_rule(rule: ProtectionRule) -> bool:
+    """Return whether a protection rule cleaves a carboxyl protecting group.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     return rule.name.startswith("carboxyl_")
 
 
 def atom_is_carboxylic_acid_carbon(molecule: Any, atom_id: int) -> bool:
+    """Return whether an atom is the carbonyl carbon of a carboxylic acid.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     if atom_id not in set(molecule):
         return False
     atom = molecule.atom(atom_id)
@@ -793,6 +999,11 @@ def atom_is_carboxylic_acid_carbon(molecule: Any, atom_id: int) -> bool:
 
 
 def molecule_contains_atom_ids(molecule: Any, atom_ids: Iterable[int]) -> bool:
+    """Return molecule contains atom IDs from a molecule or molecule node.
+
+    It relies on globally consistent atom maps so protected atom IDs remain meaningful
+    while tracing protection and deprotection events.
+    """
     molecule_atom_ids = set(molecule)
     return set(atom_ids) <= molecule_atom_ids
 
@@ -802,6 +1013,11 @@ def find_child_molecule_node(
     rxn_record: ReactionRecord,
     reaction_side_molecule: Any,
 ) -> str | None:
+    """Find child molecule node if a valid match exists.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     for child_mol_id in rxn_record.child_mol_ids:
         smiles_text = index.molecule_records[child_mol_id].smiles
         if not smiles_text:
@@ -817,6 +1033,11 @@ def find_child_molecule_node(
 
 
 def protected_functional_group(pg_type: str, molecule: Any, atom_ids: tuple[int, ...]) -> str:
+    """Identify the protected functional group represented by matched atom IDs.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     if pg_type.startswith("amine"):
         return "amine"
     if pg_type.startswith("carbonyl"):
@@ -845,6 +1066,11 @@ def classify_multicenter_status(
     reaction_smiles: str,
     deprotection_query_atoms: set[int],
 ) -> tuple[str, int]:
+    """Classify multicenter status against reference rules.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     centers = reaction_center_atoms(reaction_smiles)
     if not centers:
         return "unknown", 0
@@ -872,6 +1098,11 @@ def classify_multicenter_status(
 
 
 def transformed_products(rule: ProtectionRule, molecule: Any) -> list[Any]:
+    """Generate deprotected products for a matched protection rule.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     from chython import Transformer
 
     try:
@@ -886,6 +1117,11 @@ def detect_deprotections(
     protection_rules: dict[str, ProtectionRule],
     config: ProtectionAnalysisConfig,
 ) -> list[DeprotectionMatch]:
+    """Detect deprotection events in one mapped route reaction.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     reaction = parse_reaction(rxn_record.reaction_smiles)
     products = list(reaction.products)
     matches: list[DeprotectionMatch] = []
@@ -1059,6 +1295,11 @@ def trace_protected_group_backward(
     match: DeprotectionMatch,
     config: ProtectionAnalysisConfig,
 ) -> TraceResult:
+    """Trace a protected atom set backward through earlier route steps.
+
+    The output is used to decide whether a protecting group was stock, introduced,
+    persistent, or removed during the route.
+    """
     if match.protected_precursor_node_id is None:
         return TraceResult(
             trace_status="failed",
@@ -1222,6 +1463,11 @@ def event_from_match_and_trace(
     match: DeprotectionMatch,
     trace: TraceResult,
 ) -> DeprotectionEvent:
+    """Build a deprotection event from a rule match and its backward trace.
+
+    The output is used to decide whether a protecting group was stock, introduced,
+    persistent, or removed during the route.
+    """
     rxn_record = index.reaction_records[match.deprotection_node_id]
     protection_reaction_smiles = ""
     if trace.protection_node_id:
@@ -1288,6 +1534,11 @@ def event_from_match_and_trace(
 
 
 def sequence_querycgr_parts(sequence: tuple[str, ...]) -> tuple[Any, ...]:
+    """Compose QueryCGR objects for each rule in a composite sequence.
+
+    Composite-rule families are compared structurally so protection rules are grouped by
+    chemistry instead of raw SMARTS text.
+    """
     parts = []
     for rule_smarts in sequence:
         query_cgr = rule_query_cgr(rule_smarts)
@@ -1296,6 +1547,11 @@ def sequence_querycgr_parts(sequence: tuple[str, ...]) -> tuple[Any, ...]:
 
 
 def sequence_querycgr_hash(sequence: tuple[str, ...]) -> tuple[str, str]:
+    """Build a stable structural hash for a composite-rule sequence.
+
+    Composite-rule families are compared structurally so protection rules are grouped by
+    chemistry instead of raw SMARTS text.
+    """
     try:
         parts = sequence_querycgr_parts(sequence)
         querycgr_text = json.dumps(parts, sort_keys=True, default=repr)
@@ -1311,6 +1567,11 @@ def sequences_querycgr_isomorphic(
     left: tuple[str, ...],
     right: tuple[str, ...],
 ) -> bool:
+    """Return whether two composite-rule sequences are QueryCGR-isomorphic.
+
+    Composite-rule families are compared structurally so protection rules are grouped by
+    chemistry instead of raw SMARTS text.
+    """
     if len(left) != len(right):
         return False
     try:
@@ -1323,6 +1584,11 @@ def sequences_querycgr_isomorphic(
 
 
 def load_composite_rule_index(paths: Iterable[Path] | None) -> dict[str, CompositeRuleFamily]:
+    """Load composite rule index from configured sources.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     if not paths:
         return {}
     families_by_hash: dict[str, CompositeRuleFamily] = {}
@@ -1354,6 +1620,11 @@ def load_composite_rule_index(paths: Iterable[Path] | None) -> dict[str, Composi
 
 
 def default_rule_extractor() -> SynPlannerRuleExtractor:
+    """Return the default path for rule extractor.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     args = argparse.Namespace(
         config=None,
         environment_atom_count=1,
@@ -1369,6 +1640,11 @@ def match_family_for_sequence(
     sequence: tuple[str, ...],
     families_by_hash: dict[str, CompositeRuleFamily],
 ) -> CompositeRuleFamily | None:
+    """Find the composite-rule family matching a rule sequence.
+
+    Composite-rule families are compared structurally so protection rules are grouped by
+    chemistry instead of raw SMARTS text.
+    """
     _querycgr, query_hash = sequence_querycgr_hash(sequence)
     return families_by_hash.get(query_hash)
 
@@ -1380,6 +1656,11 @@ def collect_interval_rule_observations(
     config: ProtectionAnalysisConfig,
     rule_extractor: SynPlannerRuleExtractor | None,
 ) -> list[IntervalRuleObservation]:
+    """Collect interval rule observations from route-analysis input data.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     if not config.collect_interval_rules or not event.interval_reaction_ids:
         return []
     if rule_extractor is None:
@@ -1449,6 +1730,43 @@ def collect_interval_rule_observations(
     return observations
 
 
+def collect_single_rule_observations(
+    events: list[DeprotectionEvent],
+    index: RouteIndex,
+    rule_extractor: SynPlannerRuleExtractor | None,
+) -> list[ProtectionSingleRuleObservation]:
+    """Collect one-step rules inside resolved protection intervals.
+
+    The collection is independent of whether those one-step rules form a valid
+    composite rule, so it captures the chemistry that happens between protection
+    source and deprotection even when no interval composite rule is found.
+    """
+    if rule_extractor is None:
+        return []
+
+    observations: list[ProtectionSingleRuleObservation] = []
+    for event in events:
+        if event.trace_status not in {"introduced", "stock"}:
+            continue
+        for rxn_id in event.interval_reaction_ids:
+            rxn_record = index.reaction_records.get(rxn_id)
+            if rxn_record is None:
+                continue
+            step, _cache_hit = rule_extractor.extract(rxn_record.reaction_smiles)
+            if step is None:
+                continue
+            observations.append(
+                ProtectionSingleRuleObservation(
+                    route_id=event.route_id,
+                    pg_type=event.pg_type,
+                    rule_smarts=step.rule_smarts,
+                    reaction_smiles=step.reaction_smiles,
+                    event_id=event.event_id,
+                )
+            )
+    return observations
+
+
 def analyze_route_protection(
     route: dict[str, Any],
     route_id: Any,
@@ -1457,6 +1775,11 @@ def analyze_route_protection(
     config: ProtectionAnalysisConfig | None = None,
     rule_extractor: SynPlannerRuleExtractor | None = None,
 ) -> tuple[list[DeprotectionEvent], list[IntervalRuleObservation], RouteIndex]:
+    """Analyze protecting-group behavior in a single route.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     config = config or ProtectionAnalysisConfig()
     families = composite_rule_index or {}
     index = build_route_index(route)
@@ -1489,6 +1812,11 @@ def analyze_route_protection(
 
 
 def event_to_row(event: DeprotectionEvent) -> dict[str, Any]:
+    """Convert one deprotection event into an output TSV row.
+
+    The output is used to decide whether a protecting group was stock, introduced,
+    persistent, or removed during the route.
+    """
     return {
         "event_id": event.event_id,
         "route_id": event.route_id,
@@ -1528,6 +1856,11 @@ def event_to_row(event: DeprotectionEvent) -> dict[str, Any]:
 
 
 def interval_rule_to_row(observation: IntervalRuleObservation) -> dict[str, Any]:
+    """Convert one protection interval observation into an output TSV row.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     return {
         "event_id": observation.event_id,
         "route_id": observation.route_id,
@@ -1560,6 +1893,11 @@ def trace_failure_row(
     event: DeprotectionEvent,
     trace: TraceResult | None = None,
 ) -> dict[str, Any]:
+    """Convert one protection trace failure into an output TSV row.
+
+    The output is used to decide whether a protecting group was stock, introduced,
+    persistent, or removed during the route.
+    """
     return {
         "event_id": event.event_id,
         "route_id": event.route_id,
@@ -1583,6 +1921,11 @@ def route_stats_row(
     events: list[DeprotectionEvent],
     interval_rules: list[IntervalRuleObservation],
 ) -> dict[str, Any]:
+    """Build an output row for route stats.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     lifetimes = [event.lifetime_steps for event in events]
     pg_types = sorted({event.pg_type for event in events})
     family_ids = {obs.composite_rule_family_id for obs in interval_rules}
@@ -1625,7 +1968,157 @@ def route_stats_row(
     }
 
 
+def matching_single_rule_aggregate(
+    aggregate_buckets: dict[tuple[Any, ...], list[ProtectionSingleRuleAggregate]],
+    query_cgr: Any,
+    pg_type: str | None = None,
+) -> ProtectionSingleRuleAggregate | None:
+    """Find a single-rule aggregate with the same QueryCGR.
+
+    A coarse QueryCGR signature is used only as a lookup bucket; the final duplicate
+    decision is made by QueryCGR isomorphism so equivalent SMARTS with different atom
+    maps are merged into one row. When ``pg_type`` is supplied, matching is constrained
+    to a single protecting-group-specific aggregate.
+    """
+    for aggregate in aggregate_buckets.get(query_cgr_coarse_signature(query_cgr), []):
+        if pg_type is not None and aggregate.pg_types != {pg_type}:
+            continue
+        if query_cgr_isomorphic(aggregate.query_cgr, query_cgr):
+            return aggregate
+    return None
+
+
+def summarize_single_rules_by_pg(
+    observations: Iterable[ProtectionSingleRuleObservation],
+) -> list[dict[str, Any]]:
+    """Summarize intervening one-step rules by PG type and QueryCGR identity.
+
+    The output reports how often each single-step rule occurs inside resolved
+    protection intervals, without requiring the rule to be part of a valid composite
+    rule family.
+    """
+    aggregate_buckets: dict[tuple[Any, ...], list[ProtectionSingleRuleAggregate]] = (
+        defaultdict(list)
+    )
+    aggregates: list[ProtectionSingleRuleAggregate] = []
+
+    for observation in observations:
+        query_cgr = rule_query_cgr(observation.rule_smarts)
+        signature = query_cgr_coarse_signature(query_cgr)
+        aggregate = matching_single_rule_aggregate(
+            aggregate_buckets,
+            query_cgr,
+            pg_type=observation.pg_type,
+        )
+        if aggregate is None:
+            aggregate = ProtectionSingleRuleAggregate(
+                representative_rule=observation.rule_smarts,
+                query_cgr=query_cgr,
+                pg_types={observation.pg_type},
+            )
+            aggregate_buckets[signature].append(aggregate)
+            aggregates.append(aggregate)
+
+        aggregate.rule_count += 1
+        aggregate.pg_types.add(observation.pg_type)
+        aggregate.route_ids.add(observation.route_id)
+        aggregate.event_ids.add(observation.event_id)
+        aggregate.reaction_smiles.add(observation.reaction_smiles)
+
+    rows = [
+        {
+            "source_pg_type": next(iter(aggregate.pg_types)),
+            "rule": aggregate.representative_rule,
+            "route_count": len(aggregate.route_ids),
+            "rule_count": aggregate.rule_count,
+            "route_ids": ",".join(
+                sorted(aggregate.route_ids, key=reference_sort_key)
+            ),
+        }
+        for aggregate in aggregates
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            -int(row["route_count"]),
+            -int(row["rule_count"]),
+            row["source_pg_type"],
+            row["rule"],
+        ),
+    )
+
+
+def summarize_single_rules(
+    observations: Iterable[ProtectionSingleRuleObservation],
+) -> list[dict[str, Any]]:
+    """Summarize intervening one-step rules by PG type.
+
+    This compatibility wrapper returns the per-protecting-group table used for
+    ``*_protection_single_rules.tsv``.
+    """
+    return summarize_single_rules_by_pg(observations)
+
+
+def summarize_aggregate_single_rules(
+    observations: Iterable[ProtectionSingleRuleObservation],
+) -> list[dict[str, Any]]:
+    """Summarize intervening one-step rules across all PG types.
+
+    This table answers which single-step rules recur across protection contexts. Rules
+    are merged by QueryCGR identity only, while all contributing protecting-group types
+    are retained in the ``pg_types`` column.
+    """
+    aggregate_buckets: dict[tuple[Any, ...], list[ProtectionSingleRuleAggregate]] = (
+        defaultdict(list)
+    )
+    aggregates: list[ProtectionSingleRuleAggregate] = []
+
+    for observation in observations:
+        query_cgr = rule_query_cgr(observation.rule_smarts)
+        signature = query_cgr_coarse_signature(query_cgr)
+        aggregate = matching_single_rule_aggregate(aggregate_buckets, query_cgr)
+        if aggregate is None:
+            aggregate = ProtectionSingleRuleAggregate(
+                representative_rule=observation.rule_smarts,
+                query_cgr=query_cgr,
+            )
+            aggregate_buckets[signature].append(aggregate)
+            aggregates.append(aggregate)
+
+        aggregate.rule_count += 1
+        aggregate.pg_types.add(observation.pg_type)
+        aggregate.route_ids.add(observation.route_id)
+        aggregate.event_ids.add(observation.event_id)
+        aggregate.reaction_smiles.add(observation.reaction_smiles)
+
+    rows = [
+        {
+            "rule": aggregate.representative_rule,
+            "pg_types": ",".join(sorted(aggregate.pg_types)),
+            "route_count": len(aggregate.route_ids),
+            "rulec_count": aggregate.rule_count,
+            "route_ids": ",".join(
+                sorted(aggregate.route_ids, key=reference_sort_key)
+            ),
+        }
+        for aggregate in aggregates
+    ]
+    return sorted(
+        rows,
+        key=lambda row: (
+            -int(row["route_count"]),
+            -int(row["rulec_count"]),
+            row["rule"],
+        ),
+    )
+
+
 def max_simultaneous_pg(events: list[DeprotectionEvent]) -> int:
+    """Count the maximum number of protecting groups present at once.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     if not events:
         return 0
     points = sorted(
@@ -1658,6 +2151,11 @@ def summarize_groups(
     events: list[DeprotectionEvent],
     interval_rules: list[IntervalRuleObservation],
 ) -> list[dict[str, Any]]:
+    """Summarize protection events by protecting-group type.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     events_by_pg: dict[str, list[DeprotectionEvent]] = defaultdict(list)
     rules_by_pg: dict[str, list[IntervalRuleObservation]] = defaultdict(list)
     for event in events:
@@ -1745,6 +2243,11 @@ def summarize_rule_families(
     events: list[DeprotectionEvent],
     interval_rules: list[IntervalRuleObservation],
 ) -> list[dict[str, Any]]:
+    """Summarize protection events by matched composite-rule family.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     event_by_id = {event.event_id: event for event in events}
     grouped: dict[tuple[str, str], list[IntervalRuleObservation]] = defaultdict(list)
     for observation in interval_rules:
@@ -1800,6 +2303,11 @@ def network_edges(
     rule_family_rows: list[dict[str, Any]],
     events: list[DeprotectionEvent],
 ) -> list[dict[str, Any]]:
+    """Build route-network edges for protection summary outputs.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     lifetime_by_pg = defaultdict(list)
     for event in events:
         lifetime_by_pg[event.pg_type].append(event.lifetime_steps)
@@ -1828,12 +2336,17 @@ def _init_protection_worker(
     composite_rule_index: dict[str, CompositeRuleFamily] | None,
     protection_rules: dict[str, ProtectionRule] | None,
 ) -> None:
+    """Run the worker entry point for init protection.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     global _PROTECTION_WORKER_CONFIG
     global _PROTECTION_WORKER_RULES
     global _PROTECTION_WORKER_COMPOSITE_INDEX
     global _PROTECTION_WORKER_RULE_EXTRACTOR
-    from route_analysis.io import setup_runtime_cache_dirs
-    from route_analysis.protection.chython_rules import load_chython_protection_rules
+    from route_inspector.io import setup_runtime_cache_dirs
+    from route_inspector.protection.chython_rules import load_chython_protection_rules
 
     setup_runtime_cache_dirs()
     _PROTECTION_WORKER_CONFIG = config
@@ -1848,6 +2361,11 @@ def _init_protection_worker(
 
 
 def _protection_route_worker(item: tuple[str, dict[str, Any]]) -> dict[str, Any]:
+    """Run the worker entry point for protection route.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
     route_id, route = item
     try:
         if _PROTECTION_WORKER_CONFIG is None or _PROTECTION_WORKER_RULES is None:
@@ -1860,16 +2378,24 @@ def _protection_route_worker(item: tuple[str, dict[str, Any]]) -> dict[str, Any]
             config=_PROTECTION_WORKER_CONFIG,
             rule_extractor=_PROTECTION_WORKER_RULE_EXTRACTOR,
         )
+        route_single_rules = collect_single_rule_observations(
+            route_events,
+            route_index,
+            _PROTECTION_WORKER_RULE_EXTRACTOR,
+        )
+        stats_row = route_stats_row(
+            route_id,
+            route_index,
+            route_events,
+            route_interval_rules,
+        )
         return {
             "route_id": route_id,
             "events": route_events,
             "interval_rules": route_interval_rules,
-            "route_stats_row": route_stats_row(
-                route_id,
-                route_index,
-                route_events,
-                route_interval_rules,
-            ),
+            "single_rule_observations": route_single_rules,
+            "route_stats_row": stats_row,
+            "protection_free_route": not route_events,
             "debug_route": (
                 route_index.route
                 if _PROTECTION_WORKER_CONFIG.write_debug_json and route_events
@@ -1882,7 +2408,9 @@ def _protection_route_worker(item: tuple[str, dict[str, Any]]) -> dict[str, Any]
             "route_id": route_id,
             "events": [],
             "interval_rules": [],
+            "single_rule_observations": [],
             "route_stats_row": None,
+            "protection_free_route": False,
             "debug_route": None,
             "error": {
                 "route_id": route_id,
@@ -1905,7 +2433,12 @@ def analyze_protection_in_routes(
     progress_interval: int = 0,
     n_cpu: int = 1,
 ) -> ProtectionAnalysisResult:
-    from route_analysis.protection.chython_rules import load_chython_protection_rules
+    """Analyze protection behavior across a route collection.
+
+    The helper keeps protection detection, route tracing, and summary generation
+    separate while sharing the same normalized route index.
+    """
+    from route_inspector.protection.chython_rules import load_chython_protection_rules
 
     config = config or ProtectionAnalysisConfig()
     protection_rules = protection_rules or load_chython_protection_rules()
@@ -1921,6 +2454,8 @@ def analyze_protection_in_routes(
     route_stats_rows: list[dict[str, Any]] = []
     events: list[DeprotectionEvent] = []
     interval_rules: list[IntervalRuleObservation] = []
+    single_rule_observations: list[ProtectionSingleRuleObservation] = []
+    protection_free_routes = 0
     errors: list[dict[str, Any]] = []
     debug_routes: dict[str, dict[str, Any]] = {}
     routes_seen = 0
@@ -1936,7 +2471,12 @@ def analyze_protection_in_routes(
     n_cpu = normalize_n_cpu(n_cpu)
 
     def consume_result(result: dict[str, Any]) -> None:
-        nonlocal routes_seen
+        """Merge one worker result into the aggregate state.
+
+        The helper keeps protection detection, route tracing, and summary generation
+        separate while sharing the same normalized route index.
+        """
+        nonlocal routes_seen, protection_free_routes
         routes_seen += 1
         error = result.get("error")
         if error:
@@ -1957,8 +2497,11 @@ def analyze_protection_in_routes(
 
         events.extend(result["events"])
         interval_rules.extend(result["interval_rules"])
+        single_rule_observations.extend(result.get("single_rule_observations", []))
         if result["route_stats_row"] is not None:
             route_stats_rows.append(result["route_stats_row"])
+        if result.get("protection_free_route"):
+            protection_free_routes += 1
         if result["debug_route"] is not None:
             debug_routes[result["route_id"]] = result["debug_route"]
 
@@ -1994,16 +2537,24 @@ def analyze_protection_in_routes(
                             rule_extractor=rule_extractor,
                         )
                     )
+                    route_single_rules = collect_single_rule_observations(
+                        route_events,
+                        route_index,
+                        rule_extractor,
+                    )
+                    stats_row = route_stats_row(
+                        route_id,
+                        route_index,
+                        route_events,
+                        route_interval_rules,
+                    )
                     result = {
                         "route_id": route_id,
                         "events": route_events,
                         "interval_rules": route_interval_rules,
-                        "route_stats_row": route_stats_row(
-                            route_id,
-                            route_index,
-                            route_events,
-                            route_interval_rules,
-                        ),
+                        "single_rule_observations": route_single_rules,
+                        "route_stats_row": stats_row,
+                        "protection_free_route": not route_events,
                         "debug_route": (
                             route_index.route
                             if config.write_debug_json and route_events
@@ -2016,7 +2567,9 @@ def analyze_protection_in_routes(
                         "route_id": route_id,
                         "events": [],
                         "interval_rules": [],
+                        "single_rule_observations": [],
                         "route_stats_row": None,
+                        "protection_free_route": False,
                         "debug_route": None,
                         "error": {
                             "route_id": route_id,
@@ -2049,7 +2602,10 @@ def analyze_protection_in_routes(
     ]
     group_summary_rows = summarize_groups(events, interval_rules)
     rule_family_rows = summarize_rule_families(events, interval_rules)
-    network_edge_rows = network_edges(rule_family_rows, events)
+    single_rule_rows = summarize_single_rules(single_rule_observations)
+    aggregate_single_rule_rows = summarize_aggregate_single_rules(
+        single_rule_observations
+    )
 
     top_pg_types = [
         {"pg_type": row["pg_type"], "popularity": row["popularity"]}
@@ -2059,7 +2615,11 @@ def analyze_protection_in_routes(
         "dataset": "",
         "n_routes": routes_seen,
         "n_routes_with_pg": len({event.route_id for event in events}),
+        "n_protection_free_routes": protection_free_routes,
         "n_deprotection_events": len(events),
+        "n_protection_single_rules": len(single_rule_rows),
+        "n_protection_agg_single_rules": len(aggregate_single_rule_rows),
+        "n_protection_single_rule_observations": len(single_rule_observations),
         "n_resolved_introduced": sum(
             1 for event in events if event.trace_status == "introduced"
         ),
@@ -2099,9 +2659,10 @@ def analyze_protection_in_routes(
         route_stats_rows=route_stats_rows,
         event_rows=event_rows,
         interval_rule_rows=interval_rule_rows,
+        single_rule_rows=single_rule_rows,
+        aggregate_single_rule_rows=aggregate_single_rule_rows,
         group_summary_rows=group_summary_rows,
         rule_family_rows=rule_family_rows,
-        network_edge_rows=network_edge_rows,
         trace_failure_rows=trace_failure_rows,
         summary=summary,
         debug_routes=debug_routes,

@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, "") and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from route_analysis.composite_rules.extract import (
+from route_inspector.composite_rules.extract import (
     RouteProcessingStats,
     SynPlannerRuleExtractor,
     _composite_route_worker,
@@ -24,7 +24,7 @@ from route_analysis.composite_rules.extract import (
     process_route_for_composites,
     rule_extractor_args_dict,
 )
-from route_analysis.io import (
+from route_inspector.io import (
     expand_composite_rule_tsv_paths,
     normalize_n_cpu,
     read_json,
@@ -33,6 +33,7 @@ from route_analysis.io import (
     setup_runtime_cache_dirs,
     split_cell,
     write_json,
+    write_standard_sidecars,
     write_tsv,
 )
 
@@ -47,10 +48,20 @@ class CompositeRuleSet:
 
     @property
     def rules(self) -> set[str]:
+        """Return the normalized rule strings represented by this scored set.
+
+        The scorer normalizes rule sequences before comparison so order-sensitive
+        composite rules can be matched exactly and weighted by popularity.
+        """
         return set(self.popularity_by_rule)
 
     @property
     def total_popularity(self) -> int:
+        """Return the summed popularity across all rules in the set.
+
+        The scorer normalizes rule sequences before comparison so order-sensitive
+        composite rules can be matched exactly and weighted by popularity.
+        """
         return sum(self.popularity_by_rule.values())
 
 
@@ -63,6 +74,11 @@ class CompositeRuleClassificationSet:
     parse_errors: int = 0
 
     def weights(self, rule: str) -> tuple[int, int]:
+        """Return per-rule weights keyed by normalized composite rule.
+
+        The scorer normalizes rule sequences before comparison so order-sensitive
+        composite rules can be matched exactly and weighted by popularity.
+        """
         return (
             self.positive_weight_by_rule.get(rule, 0),
             self.negative_weight_by_rule.get(rule, 0),
@@ -70,12 +86,22 @@ class CompositeRuleClassificationSet:
 
 
 def ratio(numerator: int | float, denominator: int | float) -> float:
+    """Return a safe numerator-to-denominator ratio.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     if denominator == 0:
         return 0.0
     return numerator / denominator
 
 
 def normalize_composite_rule(rule: str) -> str:
+    """Normalize composite rule for route-inspector processing.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     parts = [part.strip() for part in rule.split("$") if part.strip()]
     if len(parts) < 2:
         raise ValueError("composite rule must contain at least two rule SMARTS")
@@ -83,6 +109,11 @@ def normalize_composite_rule(rule: str) -> str:
 
 
 def popularity_from_row(row: dict[str, str]) -> int:
+    """Read a rule popularity value from an extracted-rule TSV row.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     for column in ("popularity", "route_ids_size"):
         value = row.get(column, "").strip()
         if value.isdigit():
@@ -92,12 +123,22 @@ def popularity_from_row(row: dict[str, str]) -> int:
 
 
 def split_composite_rules_cell(value: str | None) -> list[str]:
+    """Split composite rules cell into normalized values.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     if not value:
         return []
     return [part.strip() for part in value.split(" || ") if part.strip()]
 
 
 def classification_from_row(row: dict[str, str], path: Path) -> str | None:
+    """Read positive or negative alchemical classification from a TSV row.
+
+    Classification-aware scores reward overlap with positive alchemical rules and
+    penalize overlap with rules already explained by default templates.
+    """
     value = row.get("classification", "").strip().lower()
     if value in {"positive", "pos"}:
         return "positive"
@@ -113,6 +154,11 @@ def classification_from_row(row: dict[str, str], path: Path) -> str | None:
 
 
 def expand_classification_tsv_paths(paths: list[Path]) -> list[Path]:
+    """Resolve output path information for expand classification TSV paths.
+
+    Classification-aware scores reward overlap with positive alchemical rules and
+    penalize overlap with rules already explained by default templates.
+    """
     expanded: list[Path] = []
     seen: set[Path] = set()
     for raw_path in paths:
@@ -137,6 +183,11 @@ def expand_classification_tsv_paths(paths: list[Path]) -> list[Path]:
 
 
 def empty_classification_set() -> CompositeRuleClassificationSet:
+    """Create an empty scored rule set for a classification bucket.
+
+    Classification-aware scores reward overlap with positive alchemical rules and
+    penalize overlap with rules already explained by default templates.
+    """
     return CompositeRuleClassificationSet(
         source="",
         positive_weight_by_rule={},
@@ -147,6 +198,11 @@ def empty_classification_set() -> CompositeRuleClassificationSet:
 def load_composite_rule_classifications(
     paths: list[Path] | None,
 ) -> CompositeRuleClassificationSet:
+    """Load composite rule classifications from configured sources.
+
+    Classification-aware scores reward overlap with positive alchemical rules and
+    penalize overlap with rules already explained by default templates.
+    """
     if not paths:
         return empty_classification_set()
 
@@ -188,6 +244,11 @@ def load_composite_rule_classifications(
 
 
 def load_extracted_composite_rule_set(paths: list[Path]) -> CompositeRuleSet:
+    """Load extracted composite rule set from configured sources.
+
+    Reference rules are extracted directly from the route JSON with the same SynPlanner
+    settings used for the candidate composite rules.
+    """
     popularity_by_rule: dict[str, int] = defaultdict(int)
     references_by_rule: dict[str, set[str]] = defaultdict(set)
     rows_seen = 0
@@ -229,6 +290,11 @@ def reference_composite_rules_from_routes(
     n_cpu: int = 1,
     extractor_args: Any | None = None,
 ) -> tuple[CompositeRuleSet, RouteProcessingStats, list[dict[str, Any]]]:
+    """Extract reference composite rules directly from route JSON.
+
+    Reference rules are extracted directly from the route JSON with the same SynPlanner
+    settings used for the candidate composite rules.
+    """
     routes_json_path = resolve_existing_path(routes_json_path)
     routes_json = read_json(routes_json_path)
     route_work_items = limited_route_items(routes_json, limit)
@@ -239,6 +305,11 @@ def reference_composite_rules_from_routes(
     stats = RouteProcessingStats()
 
     def consume_result(result: dict[str, Any], index: int) -> None:
+        """Merge one worker result into the aggregate state.
+
+        The scorer normalizes rule sequences before comparison so order-sensitive
+        composite rules can be matched exactly and weighted by popularity.
+        """
         merge_route_processing_stats(stats, result["stats"])
         error = result.get("error")
         if error:
@@ -343,6 +414,11 @@ def overlap_score_row(
     reference: CompositeRuleSet,
     classifications: CompositeRuleClassificationSet | None = None,
 ) -> dict[str, Any]:
+    """Build the summary row for one overlap score bucket.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     overlap = extracted.rules & reference.rules
     union = extracted.rules | reference.rules
     overlapping_popularity = sum(extracted.popularity_by_rule[rule] for rule in overlap)
@@ -422,6 +498,11 @@ def matched_rule_rows(
     reference: CompositeRuleSet,
     classifications: CompositeRuleClassificationSet | None = None,
 ) -> list[dict[str, Any]]:
+    """Build detailed rows for matched composite rules.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     rows = []
     classifications = classifications or empty_classification_set()
     for rule in sorted(
@@ -465,6 +546,11 @@ def matched_rule_rows(
 
 
 def output_paths(output: Path) -> tuple[Path, Path, Path]:
+    """Resolve output TSV and summary paths for overlap scoring.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     if output.is_dir() or output.suffix == "":
         return (
             output / "composite_rule_overlap_scores.tsv",
@@ -494,6 +580,11 @@ def score_composite_rule_overlap(
     n_cpu: int = 1,
     extractor_args: Any | None = None,
 ) -> dict[str, Any]:
+    """Score composite rule overlap against reference routes.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     extracted = load_extracted_composite_rule_set(extracted_tsvs)
     classifications = load_composite_rule_classifications(classification_tsvs)
     reference, reference_stats, errors = reference_composite_rules_from_routes(
@@ -583,6 +674,11 @@ def score_composite_rule_overlap(
 
 
 def run(args: Any) -> int:
+    """Run this module command with parsed CLI arguments.
+
+    The scorer normalizes rule sequences before comparison so order-sensitive composite
+    rules can be matched exactly and weighted by popularity.
+    """
     setup_runtime_cache_dirs()
     if args.min_length < 2:
         raise ValueError("--min-length must be at least 2")
@@ -590,6 +686,12 @@ def run(args: Any) -> int:
         args.max_length = None
     if args.max_length is not None and args.max_length < args.min_length:
         raise ValueError("--max-length must be greater than or equal to --min-length")
+    if getattr(args, "output", None) is None:
+        if getattr(args, "output_dir", None) is None:
+            raise ValueError("either --output or --output-dir is required")
+        args.output = args.output_dir
+    elif getattr(args, "output_dir", None) is not None:
+        raise ValueError("--output and --output-dir cannot be used together")
 
     rule_extractor = SynPlannerRuleExtractor.from_args(args)
     summary = score_composite_rule_overlap(
@@ -610,5 +712,25 @@ def run(args: Any) -> int:
             else None
         ),
     )
+    sidecars = write_standard_sidecars(
+        Path(summary["output"]).parent,
+        command_name="score-composite-overlap",
+        summary=summary,
+        errors=summary.get("reference_error_examples", []),
+        input_files=[
+            *args.extracted_tsv,
+            args.reference_routes_json,
+            *(args.classification_tsv or []),
+        ],
+        output_files={
+            "scores": summary["output"],
+            "matches": summary["matches_output"],
+            "summary": summary["summary_file"],
+        },
+        config_path=getattr(args, "config", None),
+        cli_args=args,
+    )
+    summary["sidecar_files"] = sidecars
+    write_json(Path(summary["summary_file"]), summary)
     print(json.dumps(summary, indent=2), flush=True)
     return 0

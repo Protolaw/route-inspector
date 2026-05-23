@@ -37,14 +37,15 @@ Issues = "https://github.com/Protolaw/route-inspector/issues"
 Documentation = "https://github.com/Protolaw/route-inspector/tree/main/docs"
 
 [project.scripts]
-route-inspector = "route_analysis.cli:main"
-analyze-protection = "route_analysis.cli:analyze_protection"
-classify-alchemical-rules = "route_analysis.cli:classify_alchemical_rules"
-collect-alchemical-rules = "route_analysis.cli:extract_alchemical_rules"
-extract-composite-rules = "route_analysis.cli:extract_composite_rules"
-score-composite-overlap = "route_analysis.cli:score_composite_overlap"
-unwrap-composite-rule = "route_analysis.cli:unwrap_composite_rule"
-unwrap-alchemical-rule = "route_analysis.cli:unwrap_alchemical_rule"
+route-inspector = "route_inspector.cli:main"
+analyze-protection = "route_inspector.cli:analyze_protection"
+classify-alchemical-rules = "route_inspector.cli:classify_alchemical_rules"
+collect-alchemical-rules = "route_inspector.cli:extract_alchemical_rules"
+extract-composite-rules = "route_inspector.cli:extract_composite_rules"
+preprocess-routes = "route_inspector.cli:preprocess_routes"
+score-composite-overlap = "route_inspector.cli:score_composite_overlap"
+unwrap-composite-rule = "route_inspector.cli:unwrap_composite_rule"
+unwrap-alchemical-rule = "route_inspector.cli:unwrap_alchemical_rule"
 
 [tool.setuptools.packages.find]
 where = ["."]

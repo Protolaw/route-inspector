@@ -1,7 +1,11 @@
 import csv
 import json
 
-from route_analysis.io import (
+from route_inspector.io import (
+    dataset_prefix_from_path,
+    resolve_output_path,
+    stage_output_dir,
+    write_manifest,
     write_composite_routes_without_rules,
     write_composite_rules,
     write_composite_summary,
@@ -90,3 +94,57 @@ def test_write_composite_routes_without_rules(tmp_path):
             "target_smiles": "CCO",
         }
     }
+
+
+def test_dataset_prefix_from_clean_routes_path():
+    assert dataset_prefix_from_path("data/clean/n1_routes.json") == "n1"
+    assert dataset_prefix_from_path("data/clean/n5-routes.json") == "n5"
+
+
+def test_stage_output_dir_uses_standard_stage_name(tmp_path):
+    assert stage_output_dir(tmp_path, "n1", "composite_rules") == (
+        tmp_path / "n1" / "10_composite_rules"
+    )
+
+
+def test_resolve_output_path_preserves_explicit_output(tmp_path):
+    explicit = tmp_path / "custom.tsv"
+
+    assert (
+        resolve_output_path(
+            output=explicit,
+            output_dir=tmp_path / "ignored",
+            default_filename="n1.tsv",
+        )
+        == explicit
+    )
+
+
+def test_resolve_output_path_uses_output_dir_default_filename(tmp_path):
+    assert (
+        resolve_output_path(
+            output=None,
+            output_dir=tmp_path / "stage",
+            default_filename="n1.tsv",
+        )
+        == tmp_path / "stage" / "n1.tsv"
+    )
+
+
+def test_write_manifest_creates_reproducibility_sidecar(tmp_path):
+    path = write_manifest(
+        tmp_path,
+        command_name="extract-composite-rules",
+        input_files=["data/clean/n1_routes.json"],
+        output_files={"summary": tmp_path / "summary.json"},
+        config_path="configs/rules.yaml",
+        argv=["route-inspector", "extract-composite-rules"],
+    )
+
+    manifest = json.loads(path.read_text())
+    assert path == tmp_path / "manifest.json"
+    assert manifest["command_name"] == "extract-composite-rules"
+    assert manifest["input_files"] == ["data/clean/n1_routes.json"]
+    assert manifest["output_directory"] == str(tmp_path)
+    assert manifest["config_path"] == "configs/rules.yaml"
+    assert "created_at" in manifest
