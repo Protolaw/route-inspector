@@ -2,15 +2,14 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 output/
-protection_strategy_agent_package/
-# *old/
-reference/
-comp_output/
-protection_out/
 build/
 .DS_Store
 composite_rules.egg-info/
 route_inspector.egg-info/
 
-*.png
-*.svg
+# *.png
+# *.svg
+*.html
+*.json
+outputs/
+data/raw/
